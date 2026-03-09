@@ -150,6 +150,12 @@ When implementing account auth handling:
 - Support secret managers via env vars
 - Add redaction in logs
 
+### Cookie handling (implemented)
+
+- **Import format**: `POST /accounts` accepts either raw `li_at` (+ optional `jsessionid`) or a `cookies` string, e.g. `"li_at=xxx; JSESSIONID=yyy"`.
+- **Encryption at rest**: Set `DESEARCH_ENCRYPTION_KEY` to a Fernet key (base64url, 32 bytes). Auth and proxy JSON are encrypted in SQLite. If unset, data is stored in plaintext (with a one-time warning).
+- **Log redaction**: Use `libs.core.redaction.redact_for_log()` for any dict that may contain cookies or auth; secret keys are replaced with `[REDACTED]`.
+
 ## Roadmap
 
 - [ ] MVP skeleton: FastAPI + SQLite + provider interface

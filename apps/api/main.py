@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+import logging
 
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, model_validator
+
+from libs.core.cookies import cookies_to_account_auth
 from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.redaction import redact_for_log
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Desearch LinkedIn DMs", version="0.0.2")
 
@@ -14,10 +20,29 @@ storage.migrate()
 
 
 class AccountCreateIn(BaseModel):
+    """Create account: provide auth either as raw cookies or as cookie string."""
+
     label: str = Field(..., description="Human label, e.g. 'sales-1'")
-    li_at: str = Field(..., description="LinkedIn li_at cookie value")
+    li_at: str | None = Field(None, description="LinkedIn li_at cookie value (required if cookies not set)")
     jsessionid: str | None = Field(None, description="Optional JSESSIONID cookie value")
+    cookies: str | None = Field(
+        None,
+        description="Cookie string import, e.g. 'li_at=xxx; JSESSIONID=yyy'. If set, li_at/jsessionid are ignored.",
+    )
     proxy_url: str | None = Field(None, description="Optional proxy URL")
+
+    @model_validator(mode="after")
+    def require_auth(self) -> "AccountCreateIn":
+        if self.cookies:
+            return self
+        if self.li_at:
+            return self
+        raise ValueError("Provide either 'cookies' or 'li_at'")
+
+    def to_account_auth(self) -> AccountAuth:
+        if self.cookies:
+            return cookies_to_account_auth(self.cookies)
+        return AccountAuth(li_at=self.li_at or "", jsessionid=self.jsessionid)
 
 
 class SendIn(BaseModel):
@@ -39,9 +64,13 @@ def health():
 
 @app.post("/accounts")
 def create_account(body: AccountCreateIn):
-    auth = AccountAuth(li_at=body.li_at, jsessionid=body.jsessionid)
+    try:
+        auth = body.to_account_auth()
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     proxy = ProxyConfig(url=body.proxy_url) if body.proxy_url else None
     account_id = storage.create_account(label=body.label, auth=auth, proxy=proxy)
+    logger.debug("Account created: %s", redact_for_log({"account_id": account_id, "label": body.label}))
     return {"account_id": account_id}
 
 
