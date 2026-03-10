@@ -160,10 +160,10 @@ curl -s 'http://127.0.0.1:8899/auth/check?account_id=1'
 ### Example success response:
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "error": null
 }
 ```
-  
 
 ### Important note: SQLite + FastAPI threads
 FastAPI runs normal `def` endpoints inside a threadpool. SQLite connections are thread-bound by default.
