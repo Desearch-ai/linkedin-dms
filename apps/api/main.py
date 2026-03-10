@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
+from typing import Optional
 
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.storage import Storage
@@ -12,6 +13,9 @@ app = FastAPI(title="Desearch LinkedIn DMs", version="0.0.2")
 storage = Storage()
 storage.migrate()
 
+class AuthCheckResponse(BaseModel):
+    status: str
+    error: Optional[str] = None
 
 class AccountCreateIn(BaseModel):
     label: str = Field(..., description="Human label, e.g. 'sales-1'")
@@ -43,6 +47,23 @@ def create_account(body: AccountCreateIn):
     proxy = ProxyConfig(url=body.proxy_url) if body.proxy_url else None
     account_id = storage.create_account(label=body.label, auth=auth, proxy=proxy)
     return {"account_id": account_id}
+
+
+@app.get("/auth/check", response_model=AuthCheckResponse)
+def auth_check(account_id: int):
+    try:
+        auth = storage.get_account_auth(account_id)
+        proxy = storage.get_account_proxy(account_id)
+    except KeyError:
+        return {"status": "failed", "error": "account not found"}
+
+    provider = LinkedInProvider(auth=auth, proxy=proxy)
+    result = provider.check_auth()
+
+    if result.ok:
+        return {"status": "ok"}
+
+    return {"status": "failed", "error": result.error or "authentication check failed"}
 
 
 @app.get("/threads")
