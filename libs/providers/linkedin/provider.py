@@ -23,6 +23,10 @@ class LinkedInMessage:
     sent_at: datetime
     raw: Optional[dict[str, Any]] = None
 
+@dataclass(frozen=True)
+class AuthCheckResult:
+    ok: bool
+    error: Optional[str] = None
 
 class LinkedInProvider:
     """LinkedIn DM provider.
@@ -98,3 +102,24 @@ class LinkedInProvider:
         - Add retry/backoff outside provider or inside implementation
         """
         raise NotImplementedError
+
+    def check_auth(self) -> AuthCheckResult:
+        """Perform a lightweight auth sanity check.
+
+        MVP behavior:
+        - verify required cookie presence
+        - optionally verify optional cookie format
+        - placeholder for future lightweight LinkedIn request
+
+        IMPORTANT:
+        - do not leak cookie values in errors
+        """
+        if not self.auth.li_at or not self.auth.li_at.strip():
+            return AuthCheckResult(ok=False, error="missing li_at cookie")
+
+        # Optional light validation only; do not expose cookie values
+        if self.auth.jsessionid is not None and not self.auth.jsessionid.strip():
+            return AuthCheckResult(ok=False, error="invalid JSESSIONID cookie")
+
+        # Placeholder success until real provider/network validation is implemented.
+        return AuthCheckResult(ok=True, error=None)

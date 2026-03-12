@@ -127,6 +127,44 @@ curl -s -X POST http://127.0.0.1:8899/sync \
   -d '{"account_id":1,"limit_per_thread":50}'
 ```
 
+## LinkedIn cookies
+
+This service currently accepts LinkedIn session cookies for account authentication.
+
+### Required
+- `li_at`: the primary LinkedIn session cookie
+
+### Optional
+- `JSESSIONID`: may be needed later for provider requests that require CSRF-related headers
+
+### Notes
+- Treat both values as secrets
+- Do not commit them into git
+- Do not paste real cookie values into public issues, logs, or screenshots
+
+### Example account creation
+```bash
+curl -s -X POST http://127.0.0.1:8899/accounts \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"test","li_at":"REDACTED","jsessionid":"REDACTED","proxy_url":null}'
+```
+  
+### Verify session
+
+After creating an account, you can quickly verify that the stored cookies look valid using the auth check endpoint.
+
+```bash
+curl -s 'http://127.0.0.1:8899/auth/check?account_id=1'
+```
+
+### Example success response:
+```json
+{
+  "status": "ok",
+  "error": null
+}
+```
+
 ### Important note: SQLite + FastAPI threads
 FastAPI runs normal `def` endpoints inside a threadpool. SQLite connections are thread-bound by default.
 
