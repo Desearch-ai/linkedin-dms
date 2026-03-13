@@ -15,6 +15,45 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _normalize_sent_at_to_utc(dt: datetime) -> str:
+    """Return ISO string in UTC. Naive datetimes are assumed UTC; aware are converted."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+# Schema version 0 = baseline tables (accounts, threads, messages, sync_cursors).
+# Later versions add indexes, CHECK constraints, etc. Migrations run in order.
+_MIGRATION_1_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_threads_account_id ON threads(account_id);
+CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_messages_account_id ON messages(account_id);
+"""
+
+_MIGRATION_2_MESSAGES_CHECK = """
+UPDATE messages SET direction = 'in' WHERE direction NOT IN ('in', 'out');
+CREATE TABLE messages_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL,
+  thread_id INTEGER NOT NULL,
+  platform_message_id TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  sender TEXT,
+  text TEXT,
+  sent_at TEXT NOT NULL,
+  raw_json TEXT,
+  UNIQUE(account_id, platform_message_id),
+  FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
+INSERT INTO messages_new SELECT id, account_id, thread_id, platform_message_id, direction, sender, text, sent_at, raw_json FROM messages;
+DROP TABLE messages;
+ALTER TABLE messages_new RENAME TO messages;
+CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_messages_account_id ON messages(account_id);
+"""
+
+
 class Storage:
     """SQLite storage.
 
@@ -33,8 +72,17 @@ class Storage:
     def close(self) -> None:
         self._conn.close()
 
+    def _get_schema_version(self) -> int:
+        row = self._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        if row is None:
+            return -1
+        return int(row["version"])
+
+    def _set_schema_version(self, version: int) -> None:
+        self._conn.execute("INSERT OR REPLACE INTO schema_version(version) VALUES(?)", (version,))
+
     def migrate(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist and run pending migrations."""
         self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS accounts (
@@ -82,6 +130,23 @@ class Storage:
             """
         )
         self._conn.commit()
+
+        # Bootstrap schema_version for existing DBs: single row storing current version (0 = baseline).
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)"
+        )
+        if self._get_schema_version() < 0:
+            self._set_schema_version(0)
+            self._conn.commit()
+
+        current = self._get_schema_version()
+        migrations: list[tuple[int, str]] = [(1, _MIGRATION_1_INDEXES), (2, _MIGRATION_2_MESSAGES_CHECK)]
+        for version, sql in migrations:
+            if version > current:
+                self._conn.executescript(sql)
+                self._set_schema_version(version)
+                self._conn.commit()
+                current = version
 
     def create_account(
         self,
@@ -186,11 +251,14 @@ class Storage:
                     direction,
                     sender,
                     text,
-                    sent_at.replace(tzinfo=timezone.utc).isoformat(),
+                    _normalize_sent_at_to_utc(sent_at),
                     json.dumps(raw) if raw else None,
                 ),
             )
             self._conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False
+        except sqlite3.IntegrityError as e:
+            # Only treat UNIQUE (duplicate message) as non-fatal; CHECK (invalid direction) should propagate.
+            if "UNIQUE constraint failed" in str(e):
+                return False
+            raise
