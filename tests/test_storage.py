@@ -55,6 +55,11 @@ def test_schema_version_exists_after_migrate(storage):
     assert v >= 0
 
 
+def test_schema_version_is_current_after_migrate(storage):
+    """Regression: migrate() leaves schema at current version (2 = indexes + messages CHECK)."""
+    assert storage._get_schema_version() == 2
+
+
 def test_migrate_idempotent(storage):
     """Edge case: calling migrate() twice does not fail and version does not regress."""
     v1 = storage._get_schema_version()
