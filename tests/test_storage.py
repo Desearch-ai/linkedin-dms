@@ -68,6 +68,78 @@ def test_migrate_idempotent(storage):
     assert v2 == v1
 
 
+def test_migrate_upgrades_preexisting_baseline_db(tmp_path):
+    """Regression: a DB created by the original main-branch storage.py (no schema_version,
+    no indexes, no CHECK) is upgraded correctly by migrate()."""
+    db_path = tmp_path / "legacy.sqlite"
+    # Simulate the original main-branch schema (no schema_version, no indexes, no CHECK).
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        CREATE TABLE accounts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL,
+          auth_json TEXT NOT NULL, proxy_json TEXT, created_at TEXT NOT NULL
+        );
+        CREATE TABLE threads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL,
+          platform_thread_id TEXT NOT NULL, title TEXT, created_at TEXT NOT NULL,
+          UNIQUE(account_id, platform_thread_id),
+          FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL,
+          thread_id INTEGER NOT NULL, platform_message_id TEXT NOT NULL,
+          direction TEXT NOT NULL, sender TEXT, text TEXT,
+          sent_at TEXT NOT NULL, raw_json TEXT,
+          UNIQUE(account_id, platform_message_id),
+          FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+          FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+        );
+        CREATE TABLE sync_cursors (
+          account_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+          cursor TEXT, updated_at TEXT NOT NULL,
+          PRIMARY KEY(account_id, thread_id),
+          FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+          FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+        );
+    """)
+    # Insert pre-existing data including an invalid direction value.
+    conn.execute("INSERT INTO accounts VALUES (1, 'old', '{\"li_at\":\"x\"}', NULL, '2024-01-01')")
+    conn.execute("INSERT INTO threads VALUES (1, 1, 't1', 'Title', '2024-01-01')")
+    conn.execute("INSERT INTO messages VALUES (1, 1, 1, 'm1', 'BOGUS', NULL, 'hi', '2024-01-01T00:00:00', NULL)")
+    conn.execute("INSERT INTO messages VALUES (2, 1, 1, 'm2', 'out', NULL, 'bye', '2024-01-01T00:00:00', NULL)")
+    conn.commit()
+    conn.close()
+
+    # Now open via Storage and run migrate — should upgrade in place.
+    s = Storage(db_path=str(db_path))
+    s.migrate()
+
+    # Verify schema_version is current.
+    assert s._get_schema_version() == 2
+
+    # Verify indexes exist.
+    indexes = {r[0] for r in s._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    ).fetchall()}
+    assert "idx_threads_account_id" in indexes
+    assert "idx_messages_thread_id" in indexes
+    assert "idx_messages_account_id" in indexes
+
+    # Verify existing data preserved; BOGUS direction normalized to 'in'.
+    rows = s._conn.execute("SELECT direction FROM messages ORDER BY id").fetchall()
+    assert rows[0]["direction"] == "in"   # was BOGUS, now 'in'
+    assert rows[1]["direction"] == "out"   # preserved
+
+    # Verify CHECK now enforced.
+    with pytest.raises(sqlite3.IntegrityError):
+        s._conn.execute(
+            "INSERT INTO messages VALUES (3, 1, 1, 'm3', 'bad', NULL, 'x', '2024', NULL)"
+        )
+
+    s.close()
+
+
 def test_messages_direction_check_rejects_invalid(storage, db_path):
     """Edge case: CHECK (direction IN ('in','out')) is enforced."""
     s = Storage(db_path=db_path)
@@ -200,7 +272,7 @@ def test_insert_message_normalizes_naive_datetime_as_utc(storage):
     # Stored string should look like UTC (either +00:00 or Z), not local offset
     assert row is not None
     stored = row[0]
-    assert "+00:00" in stored or stored.endswith("Z") or "2024-06-15T14:30:00" in stored
+    assert "+00:00" in stored or stored.endswith("Z"), f"Expected UTC suffix, got {stored!r}"
 
 
 def test_insert_message_converts_aware_non_utc_to_utc(storage):

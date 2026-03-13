@@ -142,23 +142,6 @@ class Storage:
             )
             """
         )
-        # Upgrade old schema_version table (version-only column) to single-row format if present.
-        info = self._conn.execute("PRAGMA table_info(schema_version)").fetchall()
-        columns = [r[1] for r in info]
-        if info and "single_row" not in columns:
-            max_ver = self._conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-            max_ver = 0 if max_ver is None else int(max_ver)
-            self._conn.execute("DROP TABLE schema_version")
-            self._conn.execute(
-                """
-                CREATE TABLE schema_version (
-                  single_row INTEGER NOT NULL PRIMARY KEY CHECK (single_row = 1),
-                  version INTEGER NOT NULL
-                )
-                """
-            )
-            self._set_schema_version(max_ver)
-            self._conn.commit()
         if self._get_schema_version() < 0:
             self._set_schema_version(0)
             self._conn.commit()
