@@ -188,6 +188,51 @@ When implementing account auth handling:
 - Support secret managers via env vars
 - Add redaction in logs
 
+## Safe logging rules
+
+The service ships `libs/core/redaction.py` to prevent secrets from leaking into logs.
+
+### How it works
+
+`configure_logging()` (called automatically in `apps/api/main.py`) installs a
+`SecretRedactingFilter` on the root logger. Every log record passes through it
+before being emitted — no manual opt-in required per call site.
+
+### Redacted keys (structured data)
+
+When logging dicts or request bodies, wrap them with `redact_for_log()`:
+
+```python
+from libs.core.redaction import redact_for_log
+
+logger.info("Account created: %s", redact_for_log({"account_id": 1, "li_at": "SECRET"}))
+# → Account created: {'account_id': 1, 'li_at': '[REDACTED]'}
+```
+
+The following dict keys are always redacted (case-insensitive):
+`li_at`, `jsessionid`, `auth_json`, `cookie`, `cookies`, `authorization`,
+`password`, `secret`, `token`, `api_key`, `apikey`, `proxy_url`
+
+### Redacted patterns (inline strings)
+
+Inline secrets in log message strings are scrubbed by `redact_string()` and
+automatically by the logging filter. Examples of patterns that get redacted:
+
+```
+li_at=SECRETVALUE          →  li_at=[REDACTED]
+JSESSIONID: ajax:csrf123   →  JSESSIONID: [REDACTED]
+Authorization=Bearer xxx   →  Authorization=[REDACTED]
+password=hunter2           →  password=[REDACTED]
+```
+
+### Rules for contributors
+
+1. **Never log raw `AccountAuth` objects** — always pass through `redact_for_log()` first.
+2. **Never log raw cookie strings** — use `redact_string()` or rely on the filter.
+3. **Never log request bodies verbatim** — extract only the non-sensitive fields.
+4. **Do not disable the logging filter** — `configure_logging()` must remain in `main.py`.
+5. **Do not add `li_at` / `jsessionid` to error messages** — use account_id instead.
+
 ## Roadmap
 
 - [ ] MVP skeleton: FastAPI + SQLite + provider interface
