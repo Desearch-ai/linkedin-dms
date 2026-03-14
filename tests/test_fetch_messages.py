@@ -501,6 +501,114 @@ def test_run_sync_sleeps_between_pages():
     storage.close()
 
 
+def test_fetch_messages_propagates_me_failure(provider):
+    """If /me returns HTTP error (expired auth), it propagates cleanly."""
+    import httpx
+    mock_client = MagicMock()
+    mock_client.get.side_effect = httpx.HTTPStatusError(
+        "403", request=MagicMock(), response=MagicMock(status_code=403),
+    )
+    with _patch_client(mock_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=50)
+
+
+def test_fetch_messages_empty_body_falls_back_to_attributed_body(provider):
+    """When body is empty string, text is extracted from attributedBody."""
+    ev = {
+        "entityUrn": "urn:li:msg:1",
+        "createdAt": 1000000,
+        "from": {"member": {"miniProfile": {"publicIdentifier": "other"}}},
+        "eventContent": {
+            "body": "",
+            "attributedBody": {"text": "Real content"},
+        },
+    }
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        _mock_resp({"elements": [ev]}),
+    ]
+    with _patch_client(mock_client):
+        messages, _ = provider.fetch_messages(
+            platform_thread_id="c1", cursor=None, limit=50,
+        )
+    assert len(messages) == 1
+    assert messages[0].text == "Real content"
+
+
+def test_real_provider_multi_page_integration():
+    """Integration: real provider + job_runner + storage, 2 pages with cursor and sleep."""
+    from unittest.mock import patch as mock_patch
+    from libs.core.job_runner import run_sync, DELAY_BETWEEN_PAGES_S
+    from libs.core.storage import Storage
+    from libs.providers.linkedin.provider import LinkedInThread
+
+    storage = Storage(db_path=":memory:")
+    storage.migrate()
+    auth = AccountAuth(li_at="mp-li", jsessionid="ajax:mp-csrf")
+    account_id = storage.create_account(label="multi-page-test", auth=auth, proxy=None)
+    provider = LinkedInProvider(auth=auth, proxy=None)
+
+    thread = LinkedInThread(platform_thread_id="conv-mp-1", title="MultiPage", raw=None)
+    page1_events = [
+        _event(entity_urn=f"urn:li:msg:{i}", created_at_ms=1700000000000 + i * 1000,
+               public_identifier="alice", body=f"msg-{i}")
+        for i in range(3)
+    ]
+    page2_events = [
+        _event(entity_urn="urn:li:msg:100", created_at_ms=1699999990000,
+               public_identifier="me-mp", body="older msg"),
+    ]
+
+    mock_client_page1 = MagicMock()
+    mock_client_page1.get.side_effect = [
+        _mock_resp(_me_response("me-mp")),
+        _mock_resp({"elements": page1_events}),
+    ]
+    mock_client_page2 = MagicMock()
+    mock_client_page2.get.side_effect = [
+        _mock_resp({"elements": page2_events}),
+    ]
+
+    call_count = {"n": 0}
+    original_clients = [mock_client_page1, mock_client_page2]
+
+    def make_client(*args, **kwargs):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        client = original_clients[idx]
+        return MagicMock(
+            __enter__=MagicMock(return_value=client),
+            __exit__=MagicMock(return_value=False),
+        )
+
+    with mock_patch("libs.providers.linkedin.provider.httpx.Client", side_effect=make_client), \
+         mock_patch("libs.core.job_runner.time.sleep") as mock_sleep, \
+         mock_patch(
+             "libs.providers.linkedin.provider.LinkedInProvider.list_threads",
+             return_value=[thread],
+         ):
+        result = run_sync(
+            account_id=account_id,
+            storage=storage,
+            provider=provider,
+            limit_per_thread=3,
+            max_pages_per_thread=None,
+        )
+
+    assert result.synced_threads == 1
+    assert result.messages_inserted == 4
+    assert result.pages_fetched == 2
+    mock_sleep.assert_called_once_with(DELAY_BETWEEN_PAGES_S)
+    rows = storage._conn.execute(
+        "SELECT platform_message_id FROM messages WHERE account_id = ? ORDER BY sent_at",
+        (account_id,),
+    ).fetchall()
+    assert len(rows) == 4
+    storage.close()
+
+
 def _mock_resp(json_data: dict) -> MagicMock:
     r = MagicMock()
     r.raise_for_status = MagicMock()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -8,6 +9,8 @@ from urllib.parse import quote
 import httpx
 
 from libs.core.models import AccountAuth, ProxyConfig
+
+logger = logging.getLogger(__name__)
 
 _VOYAGER_BASE = "https://www.linkedin.com/voyager/api"
 _VOYAGER_TIMEOUT_S = 30.0
@@ -113,10 +116,7 @@ class LinkedInProvider:
         if created_at is None:
             return None
         try:
-            if isinstance(created_at, (int, float)):
-                ts_ms = int(created_at)
-            else:
-                ts_ms = int(created_at)
+            ts_ms = int(created_at)
         except (TypeError, ValueError):
             return None
         sent_at = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
@@ -127,8 +127,8 @@ class LinkedInProvider:
         platform_message_id = str(platform_message_id)
 
         event_content = event.get("eventContent") or {}
-        text = event_content.get("body")
-        if text is None and isinstance(event_content.get("attributedBody"), dict):
+        text = event_content.get("body") or None
+        if not text and isinstance(event_content.get("attributedBody"), dict):
             text = event_content["attributedBody"].get("text")
         if not isinstance(text, str):
             text = None
@@ -200,11 +200,13 @@ class LinkedInProvider:
             timeout=_VOYAGER_TIMEOUT_S,
         ) as client:
             my_profile_id = self._get_my_profile_id(client)
+            logger.debug("fetch_messages thread=%s cursor=%s limit=%d", platform_thread_id, cursor, limit)
             resp = client.get(url, params=params, headers=headers, cookies=cookies)
             resp.raise_for_status()
             try:
                 data = resp.json()
             except Exception:
+                logger.debug("fetch_messages: non-JSON response for thread=%s", platform_thread_id)
                 data = {}
             if not isinstance(data, dict):
                 data = {}
@@ -216,11 +218,14 @@ class LinkedInProvider:
         messages: list[LinkedInMessage] = []
         created_ats: list[int] = []
         seen_ids: set[str] = set()
+        skipped = 0
         for ev in raw_events:
             if not isinstance(ev, dict):
+                skipped += 1
                 continue
             msg = self._parse_event_to_message(ev, my_profile_id)
             if msg is None:
+                skipped += 1
                 continue
             if msg.platform_message_id in seen_ids:
                 continue
@@ -233,6 +238,10 @@ class LinkedInProvider:
             except (TypeError, ValueError):
                 pass
 
+        if skipped:
+            logger.debug("fetch_messages: skipped %d malformed events for thread=%s", skipped, platform_thread_id)
+        logger.debug("fetch_messages: %d messages parsed from %d raw events", len(messages), len(raw_events))
+
         # API often returns newest first; ensure chronological order (oldest first).
         messages.sort(key=lambda m: m.sent_at)
         created_ats.sort()
@@ -241,7 +250,7 @@ class LinkedInProvider:
         if len(raw_events) < limit:
             next_cursor = None
         else:
-            next_cursor = str(min(created_ats)) if created_ats else None
+            next_cursor = str(created_ats[0]) if created_ats else None
 
         return (messages, next_cursor)
 
