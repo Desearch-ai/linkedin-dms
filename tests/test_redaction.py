@@ -40,6 +40,45 @@ class TestIssue12Acceptance:
         assert "pipeline_jsession" not in rendered
 
 
+class TestModelReprRedaction:
+    """Models with secrets must never expose them via repr/str — defense at the source."""
+
+    def test_account_auth_repr_hides_li_at(self):
+        auth = AccountAuth(li_at="SUPER_SECRET_COOKIE", jsessionid="ajax:SECRET_SESSION")
+        assert "SUPER_SECRET_COOKIE" not in repr(auth)
+        assert "SECRET_SESSION" not in repr(auth)
+        assert "[REDACTED]" in repr(auth)
+
+    def test_account_auth_str_hides_secrets(self):
+        auth = AccountAuth(li_at="secret_val", jsessionid="ajax:secret_jsid")
+        assert "secret_val" not in str(auth)
+        assert "secret_jsid" not in str(auth)
+
+    def test_account_auth_fstring_hides_secrets(self):
+        auth = AccountAuth(li_at="fstring_secret")
+        assert "fstring_secret" not in f"{auth}"
+
+    def test_proxy_config_repr_hides_url(self):
+        proxy = ProxyConfig(url="http://user:secretpass@proxy:8080")
+        assert "secretpass" not in repr(proxy)
+        assert "[REDACTED]" in repr(proxy)
+
+    def test_account_auth_safe_in_logger_without_filter(self):
+        """Even without SecretRedactingFilter, logger.info('%s', auth) is safe."""
+        import io
+        auth = AccountAuth(li_at="no_filter_secret", jsessionid="no_filter_jsid")
+        handler = logging.StreamHandler(io.StringIO())
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        test_logger = logging.getLogger("test_no_filter_repr")
+        test_logger.handlers = [handler]
+        test_logger.setLevel(logging.DEBUG)
+        test_logger.propagate = False
+        test_logger.info("Auth: %s", auth)
+        output = handler.stream.getvalue()
+        assert "no_filter_secret" not in output
+        assert "no_filter_jsid" not in output
+
+
 class TestRedactForLog:
     def test_redacts_li_at(self):
         result = redact_for_log({"li_at": "secret_cookie", "label": "test"})

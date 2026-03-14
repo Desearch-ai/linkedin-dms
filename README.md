@@ -190,9 +190,11 @@ When implementing account auth handling:
 
 ### Safe logging rules
 
-The service uses `libs/core/redaction.py` to prevent secrets from leaking into logs.
+The service uses a **defense-in-depth** approach to prevent secrets from leaking into logs:
 
-**How it works:** `configure_logging()` (called in `apps/api/main.py`) installs a `SecretRedactingFilter` on the root logger. Every log record is scrubbed before emission.
+1. **Source-level:** `AccountAuth` and `ProxyConfig` override `__repr__`/`__str__` so secrets are never exposed — even in tracebacks, print statements, f-strings, or third-party libraries.
+2. **Filter-level:** `SecretRedactingFilter` (installed by `configure_logging()` in `apps/api/main.py`) auto-scrubs every log record — catches dicts, strings, and dataclass args.
+3. **Manual helpers:** `redact_for_log()` and `redact_string()` for explicit redaction when logging dicts or raw strings.
 
 **Structured data:** When logging dicts or request bodies, wrap with `redact_for_log()`:
 
@@ -204,14 +206,15 @@ logger.info("Account created: %s", redact_for_log({"account_id": 1, "li_at": "SE
 
 Redacted dict keys (case-insensitive): `li_at`, `jsessionid`, `auth_json`, `cookie`, `cookies`, `authorization`, `password`, `secret`, `token`, `api_key`, `apikey`, `proxy_url`, `url`.
 
-**Inline strings:** Patterns like `li_at=...`, `JSESSIONID: ...`, `Authorization: Bearer ...` are scrubbed automatically by the filter. Use `redact_string()` for ad-hoc strings.
+**Inline strings:** Patterns like `li_at=...`, `JSESSIONID: ...`, `Authorization: Bearer/Basic/Token ...` are scrubbed automatically by the filter. Use `redact_string()` for ad-hoc strings.
 
 **Rules for contributors:**
-1. Never log raw `AccountAuth` (or any object holding cookies) — use `redact_for_log(asdict(auth))` or rely on the filter’s dataclass handling.
+1. `AccountAuth` and `ProxyConfig` are safe to pass to loggers directly (`logger.info("auth=%s", auth)`) — their `__repr__` never exposes secrets. For dicts containing secrets, use `redact_for_log()`.
 2. Never log raw cookie strings — use `redact_string()` or rely on the filter.
 3. Never log request bodies verbatim — log only non-sensitive fields or pass through `redact_for_log()`.
 4. Do not disable the logging filter; keep `configure_logging()` in `main.py`.
 5. Do not include `li_at` or `jsessionid` in error messages — use `account_id` instead.
+6. When adding new dataclasses that hold secrets, always override `__repr__` to redact them.
 
 ## Roadmap
 
