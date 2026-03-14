@@ -561,29 +561,16 @@ def test_real_provider_multi_page_integration():
                public_identifier="me-mp", body="older msg"),
     ]
 
-    mock_client_page1 = MagicMock()
-    mock_client_page1.get.side_effect = [
-        _mock_resp(_me_response("me-mp")),
-        _mock_resp({"elements": page1_events}),
+    # Single mock client reused across pages (client reuse via _get_client).
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response("me-mp")),       # /me (first call only, cached after)
+        _mock_resp({"elements": page1_events}),   # page 1
+        _mock_resp({"elements": page2_events}),   # page 2
     ]
-    mock_client_page2 = MagicMock()
-    mock_client_page2.get.side_effect = [
-        _mock_resp({"elements": page2_events}),
-    ]
 
-    call_count = {"n": 0}
-    original_clients = [mock_client_page1, mock_client_page2]
-
-    def make_client(*args, **kwargs):
-        idx = call_count["n"]
-        call_count["n"] += 1
-        client = original_clients[idx]
-        return MagicMock(
-            __enter__=MagicMock(return_value=client),
-            __exit__=MagicMock(return_value=False),
-        )
-
-    with mock_patch("libs.providers.linkedin.provider.httpx.Client", side_effect=make_client), \
+    with _patch_client(mock_client), \
          mock_patch("libs.core.job_runner.time.sleep") as mock_sleep, \
          mock_patch(
              "libs.providers.linkedin.provider.LinkedInProvider.list_threads",
@@ -609,16 +596,128 @@ def test_real_provider_multi_page_integration():
     storage.close()
 
 
-def _mock_resp(json_data: dict) -> MagicMock:
+def test_fetch_messages_retries_on_429_then_succeeds(provider):
+    """429 on first attempt, success on second — returns messages."""
+    ev = _event(entity_urn="urn:li:msg:1", created_at_ms=1000, public_identifier="bob", body="Hi")
+    resp_429 = MagicMock()
+    resp_429.status_code = 429
+    resp_429.headers = {}
+    resp_429.request = MagicMock()
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),                # /me
+        resp_429,                                   # events: 429
+        _mock_resp({"elements": [ev]}),             # events: retry succeeds
+    ]
+    with _patch_client(mock_client), \
+         patch("libs.providers.linkedin.provider.time.sleep"):
+        messages, _ = provider.fetch_messages(
+            platform_thread_id="c1", cursor=None, limit=50,
+        )
+    assert len(messages) == 1
+    assert messages[0].text == "Hi"
+
+
+def test_fetch_messages_exhausts_retries_on_503(provider):
+    """503 on all attempts raises HTTPStatusError after exhausting retries."""
+    import httpx
+    resp_503 = MagicMock()
+    resp_503.status_code = 503
+    resp_503.headers = {}
+    resp_503.request = MagicMock()
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),    # /me
+        resp_503,                       # attempt 1
+        resp_503,                       # attempt 2
+        resp_503,                       # attempt 3
+    ]
+    with _patch_client(mock_client), \
+         patch("libs.providers.linkedin.provider.time.sleep"):
+        with pytest.raises(httpx.HTTPStatusError):
+            provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=50)
+
+
+def test_fetch_messages_retry_honours_retry_after_header(provider):
+    """429 with Retry-After header uses that value as minimum delay."""
+    ev = _event(entity_urn="urn:li:msg:1", created_at_ms=1000, public_identifier="x", body="Ok")
+    resp_429 = MagicMock()
+    resp_429.status_code = 429
+    resp_429.headers = {"Retry-After": "10"}
+    resp_429.request = MagicMock()
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        resp_429,
+        _mock_resp({"elements": [ev]}),
+    ]
+    with _patch_client(mock_client), \
+         patch("libs.providers.linkedin.provider.time.sleep") as mock_sleep:
+        provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=50)
+    # Retry-After=10 > base delay 2.0, so sleep should be >= 10
+    assert mock_sleep.call_args[0][0] >= 10.0
+
+
+def test_fetch_messages_no_retry_on_403(provider):
+    """403 is not retryable — raises immediately without sleeping."""
+    import httpx
+    resp_403 = MagicMock()
+    resp_403.status_code = 403
+    resp_403.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "403", request=MagicMock(), response=resp_403,
+    )
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        resp_403,
+    ]
+    with _patch_client(mock_client), \
+         patch("libs.providers.linkedin.provider.time.sleep") as mock_sleep:
+        with pytest.raises(httpx.HTTPStatusError):
+            provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=50)
+    mock_sleep.assert_not_called()
+
+
+def test_provider_context_manager_closes_client(auth):
+    """Provider as context manager closes the underlying httpx.Client."""
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    with _patch_client(mock_client):
+        provider = LinkedInProvider(auth=auth, proxy=None)
+        with provider:
+            # Force client creation
+            provider._get_client()
+        mock_client.close.assert_called_once()
+
+
+def test_client_reused_across_fetch_messages_calls(provider):
+    """_get_client returns the same httpx.Client across multiple fetch_messages calls."""
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        _mock_resp({"elements": []}),
+        _mock_resp({"elements": []}),
+    ]
+    with _patch_client(mock_client) as mock_cls:
+        provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=50)
+        provider.fetch_messages(platform_thread_id="c2", cursor=None, limit=50)
+    # httpx.Client() should be called only once (reused)
+    mock_cls.assert_called_once()
+
+
+def _mock_resp(json_data: dict, status_code: int = 200) -> MagicMock:
     r = MagicMock()
+    r.status_code = status_code
     r.raise_for_status = MagicMock()
     r.json.return_value = json_data
     return r
 
 
 def _patch_client(mock_client: MagicMock):
-    """Patch httpx.Client so context manager returns mock_client."""
-    return patch("libs.providers.linkedin.provider.httpx.Client", return_value=MagicMock(
-        __enter__=MagicMock(return_value=mock_client),
-        __exit__=MagicMock(return_value=False),
-    ))
+    """Patch httpx.Client so _get_client() returns mock_client."""
+    return patch("libs.providers.linkedin.provider.httpx.Client", return_value=mock_client)

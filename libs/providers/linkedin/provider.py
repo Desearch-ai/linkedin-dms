@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -16,6 +17,9 @@ _VOYAGER_BASE = "https://www.linkedin.com/voyager/api"
 _VOYAGER_TIMEOUT_S = 30.0
 _EVENTS_PAGE_SIZE_MIN = 1
 _EVENTS_PAGE_SIZE_MAX = 500
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_BASE_DELAY_S = 2.0
+_RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,28 @@ class LinkedInProvider:
         self.auth = auth
         self.proxy = proxy
         self._my_profile_id: Optional[str] = None
+        self._client: Optional[httpx.Client] = None
+
+    def _get_client(self) -> httpx.Client:
+        """Return a reusable httpx.Client (lazy-initialized)."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(
+                proxy=self._proxy_url(),
+                timeout=_VOYAGER_TIMEOUT_S,
+            )
+        return self._client
+
+    def close(self) -> None:
+        """Close the underlying HTTP client. Safe to call multiple times."""
+        if self._client is not None and not self._client.is_closed:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> LinkedInProvider:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     def _build_headers(self) -> dict[str, str]:
         """Build Voyager API headers. JSESSIONID must be set for CSRF."""
@@ -76,6 +102,42 @@ class LinkedInProvider:
         if not self.proxy or not self.proxy.url.strip():
             return None
         return self.proxy.url
+
+    def _request_with_retry(
+        self,
+        client: httpx.Client,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """GET with retry on transient errors (429, 5xx).
+
+        Uses exponential backoff: 2s, 4s, 8s. On 429, honours Retry-After
+        header if present. Non-retryable errors are raised immediately.
+        """
+        last_exc: Optional[httpx.HTTPStatusError] = None
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            resp = client.get(url, **kwargs)
+            if resp.status_code not in _RETRY_STATUS_CODES:
+                return resp
+            last_exc = httpx.HTTPStatusError(
+                f"{resp.status_code}", request=resp.request, response=resp,
+            )
+            if attempt == _RETRY_MAX_ATTEMPTS - 1:
+                break
+            delay = _RETRY_BASE_DELAY_S * (2 ** attempt)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except (TypeError, ValueError):
+                        pass
+            logger.debug(
+                "fetch_messages: %d from LinkedIn, retry %d/%d in %.1fs",
+                resp.status_code, attempt + 1, _RETRY_MAX_ATTEMPTS, delay,
+            )
+            time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     def _get_my_profile_id(self, client: httpx.Client) -> str:
         """Fetch and cache current user publicIdentifier from Voyager /me."""
@@ -176,7 +238,8 @@ class LinkedInProvider:
 
         Raises:
           ValueError: If limit is out of range (1..500) or JSESSIONID missing.
-          httpx.HTTPStatusError: On 4xx/5xx from LinkedIn (caller may retry or back off).
+          httpx.HTTPStatusError: On non-retryable 4xx from LinkedIn, or after
+            exhausting retries on transient errors (429/5xx).
         """
         if not (_EVENTS_PAGE_SIZE_MIN <= limit <= _EVENTS_PAGE_SIZE_MAX):
             raise ValueError(
@@ -195,21 +258,18 @@ class LinkedInProvider:
         path_segment = quote(platform_thread_id, safe="")
         url = f"{_VOYAGER_BASE}/messaging/conversations/{path_segment}/events"
 
-        with httpx.Client(
-            proxy=self._proxy_url(),
-            timeout=_VOYAGER_TIMEOUT_S,
-        ) as client:
-            my_profile_id = self._get_my_profile_id(client)
-            logger.debug("fetch_messages thread=%s cursor=%s limit=%d", platform_thread_id, cursor, limit)
-            resp = client.get(url, params=params, headers=headers, cookies=cookies)
-            resp.raise_for_status()
-            try:
-                data = resp.json()
-            except Exception:
-                logger.debug("fetch_messages: non-JSON response for thread=%s", platform_thread_id)
-                data = {}
-            if not isinstance(data, dict):
-                data = {}
+        client = self._get_client()
+        my_profile_id = self._get_my_profile_id(client)
+        logger.debug("fetch_messages thread=%s cursor=%s limit=%d", platform_thread_id, cursor, limit)
+        resp = self._request_with_retry(client, url, params=params, headers=headers, cookies=cookies)
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except Exception:
+            logger.debug("fetch_messages: non-JSON response for thread=%s", platform_thread_id)
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
 
         raw_events = data.get("elements") or data.get("events") or []
         if not isinstance(raw_events, list):
