@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from typing import Any
@@ -26,15 +27,18 @@ _SECRET_KEYS = frozenset({
     "api_key",
     "apikey",
     "proxy_url",
+    "url",  # proxy/config URLs (e.g. ProxyConfig.url)
 })
 
 _REDACTED = "[REDACTED]"
 
 # Regex patterns that match inline secret values in log strings.
 # Each pattern captures a prefix group we keep and a value group we redact.
+# Authorization: run Bearer/Basic pattern first so the full header value is redacted.
 _SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(li_at\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(jsessionid\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
+    re.compile(r"(authorization\s*[=:]\s*)((?:Bearer|Basic|Token)\s+\S+)", re.IGNORECASE),
     re.compile(r"(authorization\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(password\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(api_key\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
@@ -99,7 +103,8 @@ class SecretRedactingFilter(logging.Filter):
     """Logging filter that scrubs secrets from log messages automatically.
 
     Attach to any handler or logger to ensure secrets never reach log output,
-    even when developers forget to call redact_for_log() manually.
+    even when developers forget to call redact_for_log() manually. Also redacts
+    dataclass instances in log args (e.g. AccountAuth) via asdict + redact_for_log.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -121,6 +126,8 @@ class SecretRedactingFilter(logging.Filter):
             return redact_string(value)
         if isinstance(value, dict):
             return redact_for_log(value)
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return redact_for_log(dataclasses.asdict(value))
         return value
 
 

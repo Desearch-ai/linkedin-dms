@@ -40,6 +40,8 @@ class LinkedInProvider:
     IMPORTANT:
     - Do NOT log cookies or auth headers.
     - Do NOT implement CAPTCHA/2FA bypass.
+    - If you must log request/response data, use redact_for_log() or redact_string()
+      from libs.core.redaction so secrets are never emitted.
     """
 
     def __init__(self, *, auth: AccountAuth, proxy: Optional[ProxyConfig] = None):
