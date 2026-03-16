@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
@@ -146,15 +147,11 @@ def sync_account(body: SyncIn):
             status_code=501,
             detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
         ) from None
-    except Exception as exc:
-        import httpx as _httpx
-
-        if isinstance(exc, _httpx.HTTPStatusError):
-            code = exc.response.status_code
-            if code in (301, 302, 303, 307, 308):
-                raise HTTPException(status_code=401, detail=str(exc)) from None
-            raise HTTPException(status_code=502, detail=str(exc)) from None
-        raise
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code in (301, 302, 303, 307, 308):
+            raise HTTPException(status_code=401, detail=str(exc)) from None
+        raise HTTPException(status_code=502, detail=str(exc)) from None
 
 
 @app.post("/send")

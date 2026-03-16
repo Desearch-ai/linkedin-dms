@@ -9,14 +9,21 @@ import pytest
 
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.providers.linkedin.provider import (
+    _CONVERSATIONS_QID_RE,
     _DEFAULT_COUNT,
+    _FALLBACK_CONVERSATIONS_QUERY_ID,
+    _FALLBACK_MESSAGES_QUERY_ID,
     _MAX_PAGES,
+    _MESSAGES_QID_RE,
+    _SCRIPT_SRC_RE,
     LinkedInProvider,
     LinkedInThread,
+    _discover_query_ids,
     _extract_thread_title,
     _get_oldest_timestamp,
     _parse_graphql_threads,
     _parse_threads,
+    _reset_query_id_cache,
 )
 
 # -- Fixtures ----------------------------------------------------------------
@@ -35,6 +42,18 @@ def provider(auth):
 @pytest.fixture
 def provider_with_proxy(auth):
     return LinkedInProvider(auth=auth, proxy=ProxyConfig(url="http://proxy:8080"))
+
+
+@pytest.fixture(autouse=True)
+def _prefill_query_id_cache():
+    """Pre-fill the queryId cache so tests don't trigger discovery HTTP calls."""
+    from libs.providers.linkedin.provider import _query_id_cache, _query_id_lock
+
+    with _query_id_lock:
+        _query_id_cache["conversations"] = _FALLBACK_CONVERSATIONS_QUERY_ID
+        _query_id_cache["messages"] = _FALLBACK_MESSAGES_QUERY_ID
+    yield
+    _reset_query_id_cache()
 
 
 def _voyager_response(
@@ -77,7 +96,7 @@ def _me_response(profile_urn="urn:li:fsd_profile:ACoAATest123"):
     return _ok_response({"entityUrn": profile_urn})
 
 
-def _graphql_conversations(elements, has_more=False):
+def _graphql_conversations(elements):
     """Build a GraphQL messengerConversations response."""
     return {
         "data": {
@@ -467,3 +486,185 @@ class TestExtractThreadTitle:
         included = [{"entityUrn": urn, "firstName": "", "lastName": ""}]
         # Empty name → no title
         assert _extract_thread_title(element, included) is None
+
+
+# -- Unit tests: queryId regex patterns ----------------------------------------
+
+
+class TestQueryIdRegex:
+    def test_conversations_pattern_double_quotes(self):
+        js = 'queryId:"messengerConversations.9501074288a12f3ae9e3c7ea243bccbf"'
+        match = _CONVERSATIONS_QID_RE.search(js)
+        assert match is not None
+        assert (
+            match.group(1) == "messengerConversations.9501074288a12f3ae9e3c7ea243bccbf"
+        )
+
+    def test_conversations_pattern_single_quotes(self):
+        js = "queryId:'messengerConversations.abcdef1234567890abcdef'"
+        match = _CONVERSATIONS_QID_RE.search(js)
+        assert match is not None
+        assert match.group(1) == "messengerConversations.abcdef1234567890abcdef"
+
+    def test_messages_pattern(self):
+        js = 'queryId:"messengerMessages.5846eeb71c981f11e0134cb6626cc314"'
+        match = _MESSAGES_QID_RE.search(js)
+        assert match is not None
+        assert match.group(1) == "messengerMessages.5846eeb71c981f11e0134cb6626cc314"
+
+    def test_no_match_on_unrelated(self):
+        js = 'queryId:"somethingElse.abc123"'
+        assert _CONVERSATIONS_QID_RE.search(js) is None
+        assert _MESSAGES_QID_RE.search(js) is None
+
+    def test_pattern_with_spaces(self):
+        js = 'queryId: "messengerConversations.aaaa1111bbbb2222cccc3333"'
+        match = _CONVERSATIONS_QID_RE.search(js)
+        assert match is not None
+
+    def test_script_src_extraction(self):
+        html = '<script src="https://static.licdn.com/aero-v1/sc/h/abc123"></script>'
+        urls = _SCRIPT_SRC_RE.findall(html)
+        assert len(urls) == 1
+        assert urls[0] == "https://static.licdn.com/aero-v1/sc/h/abc123"
+
+
+# -- Integration-style tests: queryId discovery --------------------------------
+
+
+class TestDiscoverQueryIds:
+    def setup_method(self):
+        _reset_query_id_cache()
+
+    def test_discovers_both_ids_from_bundle(self):
+        """Discovery finds both queryIds from JS bundle content."""
+        html = (
+            "<html><head>"
+            '<script src="https://static.licdn.com/bundle.js"></script>'
+            "</head></html>"
+        )
+        js_content = (
+            'var x=1;queryId:"messengerConversations.aaaa1111bbbb2222cccc3333dddd4444";'
+            'queryId:"messengerMessages.eeee5555ffff6666aaaa7777bbbb8888";'
+        )
+
+        html_resp = _ok_response(None)
+        html_resp.status_code = 200
+        html_resp.text = html
+
+        js_resp = _ok_response(None)
+        js_resp.status_code = 200
+        js_resp.text = js_content
+
+        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
+            client_instance = MockClient.return_value.__enter__.return_value
+            client_instance.get.side_effect = [html_resp, js_resp]
+
+            conv_id, msg_id = _discover_query_ids(
+                {"li_at": "fake", "JSESSIONID": "ajax:123"}, {}, None
+            )
+
+        assert conv_id == "messengerConversations.aaaa1111bbbb2222cccc3333dddd4444"
+        assert msg_id == "messengerMessages.eeee5555ffff6666aaaa7777bbbb8888"
+
+    def test_falls_back_when_page_returns_error(self):
+        """Falls back to hardcoded IDs when /messaging returns non-200."""
+        html_resp = _ok_response(None)
+        html_resp.status_code = 403
+        html_resp.text = "Forbidden"
+
+        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
+            client_instance = MockClient.return_value.__enter__.return_value
+            client_instance.get.return_value = html_resp
+
+            conv_id, msg_id = _discover_query_ids({"li_at": "fake"}, {}, None)
+
+        assert conv_id == _FALLBACK_CONVERSATIONS_QUERY_ID
+        assert msg_id == _FALLBACK_MESSAGES_QUERY_ID
+
+    def test_falls_back_when_no_ids_in_bundles(self):
+        """Falls back when JS bundles don't contain queryId patterns."""
+        html = '<html><script src="/bundle.js"></script></html>'
+        js_content = "var x = 1; // no queryIds here"
+
+        html_resp = _ok_response(None)
+        html_resp.status_code = 200
+        html_resp.text = html
+
+        js_resp = _ok_response(None)
+        js_resp.status_code = 200
+        js_resp.text = js_content
+
+        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
+            client_instance = MockClient.return_value.__enter__.return_value
+            client_instance.get.side_effect = [html_resp, js_resp]
+
+            conv_id, msg_id = _discover_query_ids({"li_at": "fake"}, {}, None)
+
+        assert conv_id == _FALLBACK_CONVERSATIONS_QUERY_ID
+        assert msg_id == _FALLBACK_MESSAGES_QUERY_ID
+
+    def test_caches_results(self):
+        """Second call returns cached result without HTTP requests."""
+        html = '<html><script src="/bundle.js"></script></html>'
+        js_content = (
+            'queryId:"messengerConversations.aabb11223344556677889900aabb1122";'
+            'queryId:"messengerMessages.ccdd33445566778899001122ccdd3344";'
+        )
+
+        html_resp = _ok_response(None)
+        html_resp.status_code = 200
+        html_resp.text = html
+
+        js_resp = _ok_response(None)
+        js_resp.status_code = 200
+        js_resp.text = js_content
+
+        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
+            client_instance = MockClient.return_value.__enter__.return_value
+            client_instance.get.side_effect = [html_resp, js_resp]
+
+            conv1, msg1 = _discover_query_ids({"li_at": "fake"}, {}, None)
+
+        # Second call — should use cache, no HTTP
+        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
+            conv2, msg2 = _discover_query_ids({"li_at": "fake"}, {}, None)
+            MockClient.assert_not_called()
+
+        assert conv1 == conv2
+        assert msg1 == msg2
+
+    def test_falls_back_on_http_error(self):
+        """Falls back gracefully when httpx raises an error."""
+        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
+            client_instance = MockClient.return_value.__enter__.return_value
+            client_instance.get.side_effect = httpx.ConnectError("Connection refused")
+
+            conv_id, msg_id = _discover_query_ids({"li_at": "fake"}, {}, None)
+
+        assert conv_id == _FALLBACK_CONVERSATIONS_QUERY_ID
+        assert msg_id == _FALLBACK_MESSAGES_QUERY_ID
+
+    def test_partial_discovery_uses_fallback_for_missing(self):
+        """If only one queryId is found, the other falls back."""
+        html = '<html><script src="/bundle.js"></script></html>'
+        js_content = (
+            'queryId:"messengerConversations.aabb11cc22dd33ee44ff5566aabb1122";'
+        )
+
+        html_resp = _ok_response(None)
+        html_resp.status_code = 200
+        html_resp.text = html
+
+        js_resp = _ok_response(None)
+        js_resp.status_code = 200
+        js_resp.text = js_content
+
+        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
+            client_instance = MockClient.return_value.__enter__.return_value
+            client_instance.get.side_effect = [html_resp, js_resp]
+
+            conv_id, msg_id = _discover_query_ids({"li_at": "fake"}, {}, None)
+
+        assert conv_id == "messengerConversations.aabb11cc22dd33ee44ff5566aabb1122"
+        assert msg_id == _FALLBACK_MESSAGES_QUERY_ID

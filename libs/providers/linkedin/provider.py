@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,11 +22,27 @@ _VOYAGER_BASE = "https://www.linkedin.com/voyager/api"
 # GraphQL messaging endpoint (separate from the REST-li /graphql path)
 _GRAPHQL_MSG_URL = f"{_VOYAGER_BASE}/voyagerMessagingGraphQL/graphql"
 
-# queryId used by the LinkedIn web-app for listing conversations
-_CONVERSATIONS_QUERY_ID = "messengerConversations.9501074288a12f3ae9e3c7ea243bccbf"
+# Fallback queryIds — used when auto-detection from LinkedIn's JS bundles fails.
+# These are tied to a specific LinkedIn frontend build and will eventually go stale.
+_FALLBACK_CONVERSATIONS_QUERY_ID = (
+    "messengerConversations.9501074288a12f3ae9e3c7ea243bccbf"
+)
+_FALLBACK_MESSAGES_QUERY_ID = "messengerMessages.5846eeb71c981f11e0134cb6626cc314"
+# Regex patterns to extract queryId hashes from LinkedIn's compiled JS bundles.
+# The bundles contain entries like: queryId:"messengerConversations.<32-hex-hash>"
+_CONVERSATIONS_QID_RE = re.compile(
+    r'queryId:\s*["\']?(messengerConversations\.[a-f0-9]{20,})["\']?'
+)
+_MESSAGES_QID_RE = re.compile(
+    r'queryId:\s*["\']?(messengerMessages\.[a-f0-9]{20,})["\']?'
+)
 
-# queryId for fetching messages within a conversation
-_MESSAGES_QUERY_ID = "messengerMessages.5846eeb71c981f11e0134cb6626cc314"
+# Pattern to find JS bundle URLs in LinkedIn's HTML page source
+_SCRIPT_SRC_RE = re.compile(r'<script[^>]+src="([^"]+)"', re.IGNORECASE)
+
+# Cache for discovered queryIds (thread-safe)
+_query_id_cache: dict[str, str] = {}
+_query_id_lock = threading.Lock()
 
 _STATIC_HEADERS = {
     "user-agent": (
@@ -63,6 +81,131 @@ _DEFAULT_COUNT = 20
 
 # Safety limit to prevent runaway pagination on very large inboxes
 _MAX_PAGES = 50  # 50 * 20 = 1000 threads max
+
+
+def _discover_query_ids(
+    cookies: dict[str, str],
+    headers: dict[str, str],
+    proxy_url: Optional[str] = None,
+) -> tuple[str, str]:
+    """Auto-detect current GraphQL queryIds from LinkedIn's JS bundles.
+
+    LinkedIn embeds queryId strings (e.g. ``messengerConversations.<hash>``)
+    in its compiled JavaScript bundles. This function:
+
+    1. Fetches the ``/messaging`` page HTML.
+    2. Extracts ``<script src="...">`` URLs pointing to JS bundles.
+    3. Fetches each bundle and scans for the queryId patterns.
+    4. Returns ``(conversations_query_id, messages_query_id)``.
+
+    Falls back to the hardcoded ``_FALLBACK_*`` values if discovery fails.
+    Results are cached in ``_query_id_cache`` for the process lifetime.
+    """
+    with _query_id_lock:
+        cached_conv = _query_id_cache.get("conversations")
+        cached_msg = _query_id_cache.get("messages")
+        if cached_conv and cached_msg:
+            return cached_conv, cached_msg
+
+    conv_qid: Optional[str] = None
+    msg_qid: Optional[str] = None
+
+    try:
+        with httpx.Client(
+            proxy=proxy_url,
+            timeout=20.0,
+            follow_redirects=True,
+        ) as client:
+            page_headers = {
+                "user-agent": headers.get("user-agent", _STATIC_HEADERS["user-agent"]),
+                "accept": "text/html,application/xhtml+xml",
+                "accept-language": "en-US,en;q=0.9",
+            }
+            resp = client.get(
+                "https://www.linkedin.com/messaging/",
+                headers=page_headers,
+                cookies=cookies,
+            )
+            if resp.status_code != 200:
+                logger.debug(
+                    "queryId discovery: /messaging returned %d, using fallbacks",
+                    resp.status_code,
+                )
+                return _use_fallback_query_ids()
+
+            html = resp.text
+            script_urls = _SCRIPT_SRC_RE.findall(html)
+            logger.debug("queryId discovery: found %d script tags", len(script_urls))
+
+            # Filter to likely messaging-related bundles; fall back to all if none match
+            messaging_urls = [
+                u
+                for u in script_urls
+                if "messaging" in u.lower() or "voyager" in u.lower()
+            ]
+            candidate_urls = messaging_urls or script_urls
+
+            for url in candidate_urls:
+                if url.startswith("//"):
+                    url = "https:" + url
+                elif url.startswith("/"):
+                    url = "https://www.linkedin.com" + url
+
+                try:
+                    js_resp = client.get(url, headers=page_headers, timeout=15.0)
+                    if js_resp.status_code != 200:
+                        continue
+                    js_text = js_resp.text
+                except httpx.HTTPError:
+                    continue
+
+                if not conv_qid:
+                    match = _CONVERSATIONS_QID_RE.search(js_text)
+                    if match:
+                        conv_qid = match.group(1)
+                        logger.info("Discovered conversations queryId: %s", conv_qid)
+
+                if not msg_qid:
+                    match = _MESSAGES_QID_RE.search(js_text)
+                    if match:
+                        msg_qid = match.group(1)
+                        logger.info("Discovered messages queryId: %s", msg_qid)
+
+                if conv_qid and msg_qid:
+                    break
+
+    except httpx.HTTPError as exc:
+        logger.debug("queryId discovery failed with HTTP error: %s", exc)
+    except Exception:
+        logger.debug("queryId discovery failed unexpectedly", exc_info=True)
+
+    conv_qid = conv_qid or _FALLBACK_CONVERSATIONS_QUERY_ID
+    msg_qid = msg_qid or _FALLBACK_MESSAGES_QUERY_ID
+
+    with _query_id_lock:
+        _query_id_cache["conversations"] = conv_qid
+        _query_id_cache["messages"] = msg_qid
+
+    return conv_qid, msg_qid
+
+
+def _use_fallback_query_ids() -> tuple[str, str]:
+    """Return hardcoded fallback queryIds and cache them."""
+    with _query_id_lock:
+        _query_id_cache["conversations"] = _FALLBACK_CONVERSATIONS_QUERY_ID
+        _query_id_cache["messages"] = _FALLBACK_MESSAGES_QUERY_ID
+    logger.debug(
+        "Using fallback queryIds: conversations=%s, messages=%s",
+        _FALLBACK_CONVERSATIONS_QUERY_ID,
+        _FALLBACK_MESSAGES_QUERY_ID,
+    )
+    return _FALLBACK_CONVERSATIONS_QUERY_ID, _FALLBACK_MESSAGES_QUERY_ID
+
+
+def _reset_query_id_cache() -> None:
+    """Clear the cached queryIds. Useful for testing or when IDs go stale."""
+    with _query_id_lock:
+        _query_id_cache.clear()
 
 
 @dataclass(frozen=True)
@@ -149,6 +292,12 @@ _CONVERSATIONS_RESPONSE_KEYS = (
     "messengerConversationsByCriteria",
     "messengerConversationsByLastActivity",
     "messengerConversations",
+)
+
+_MESSAGES_RESPONSE_KEYS = (
+    "messengerMessagesBySyncToken",
+    "messengerMessages",
+    "messengerMessagesByConversation",
 )
 
 
@@ -242,11 +391,7 @@ def _parse_graphql_messages(
         result = result["data"]
 
     container: dict[str, Any] = {}
-    for key in (
-        "messengerMessagesBySyncToken",
-        "messengerMessages",
-        "messengerMessagesByConversation",
-    ):
+    for key in _MESSAGES_RESPONSE_KEYS:
         if key in result and isinstance(result[key], dict):
             container = result[key]
             break
@@ -460,6 +605,8 @@ class LinkedInProvider:
         cookies = self._build_cookies()
         proxy_url = self._get_proxy_url()
 
+        conv_query_id, _ = _discover_query_ids(cookies, headers, proxy_url)
+
         all_threads: list[LinkedInThread] = []
         page = 0
 
@@ -471,10 +618,10 @@ class LinkedInProvider:
             mailbox_urn = self._resolve_profile_urn(client, cookies)
             logger.info("Resolved mailbox URN: %s", mailbox_urn)
 
+            encoded_urn = quote(mailbox_urn, safe="")
             last_activity_before = int(time.time() * 1000)
 
             while page < _MAX_PAGES:
-                encoded_urn = quote(mailbox_urn, safe="")
                 variables = (
                     f"(query:(predicateUnions:List("
                     f"(conversationCategoryPredicate:(category:PRIMARY_INBOX)))),"
@@ -483,9 +630,7 @@ class LinkedInProvider:
                     f"lastUpdatedBefore:{last_activity_before})"
                 )
                 full_url = (
-                    f"{_GRAPHQL_MSG_URL}"
-                    f"?queryId={_CONVERSATIONS_QUERY_ID}"
-                    f"&variables={variables}"
+                    f"{_GRAPHQL_MSG_URL}?queryId={conv_query_id}&variables={variables}"
                 )
                 resp = client.get(
                     full_url,
@@ -542,6 +687,8 @@ class LinkedInProvider:
         cookies = self._build_cookies()
         proxy_url = self._get_proxy_url()
 
+        _, msg_query_id = _discover_query_ids(cookies, headers, proxy_url)
+
         encoded_conv = quote(platform_thread_id, safe="")
 
         if cursor:
@@ -550,9 +697,7 @@ class LinkedInProvider:
         else:
             variables = f"(conversationUrn:{encoded_conv})"
 
-        full_url = (
-            f"{_GRAPHQL_MSG_URL}?queryId={_MESSAGES_QUERY_ID}&variables={variables}"
-        )
+        full_url = f"{_GRAPHQL_MSG_URL}?queryId={msg_query_id}&variables={variables}"
 
         with httpx.Client(
             proxy=proxy_url,
