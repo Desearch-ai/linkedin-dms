@@ -139,7 +139,9 @@ class LinkedInProvider:
         """Build request headers including the CSRF token from JSESSIONID."""
         headers = dict(_STATIC_HEADERS)
         if self.auth.jsessionid:
-            headers["csrf-token"] = self.auth.jsessionid
+            # LinkedIn expects csrf-token WITHOUT surrounding quotes,
+            # even though the JSESSIONID cookie value includes them.
+            headers["csrf-token"] = self.auth.jsessionid.strip('"')
         return headers
 
     def _build_cookies(self) -> dict[str, str]:

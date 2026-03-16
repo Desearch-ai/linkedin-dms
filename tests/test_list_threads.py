@@ -135,6 +135,13 @@ class TestBuildHeaders:
         assert "user-agent" in headers
         assert "x-restli-protocol-version" in headers
 
+    def test_csrf_token_strips_quotes(self):
+        """JSESSIONID cookie value has surrounding quotes; csrf-token must not."""
+        auth = AccountAuth(li_at="fake", jsessionid='"ajax:1234567890"')
+        p = LinkedInProvider(auth=auth)
+        headers = p._build_headers()
+        assert headers["csrf-token"] == "ajax:1234567890"
+
     def test_no_csrf_without_jsessionid(self):
         auth = AccountAuth(li_at="fake", jsessionid=None)
         p = LinkedInProvider(auth=auth)
