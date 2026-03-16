@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
-from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.job_runner import SyncResult, run_send, run_sync
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log
 from libs.core.storage import Storage
@@ -30,7 +30,10 @@ class AuthCheckResponse(BaseModel):
 
 class AccountCreateIn(BaseModel):
     label: str = Field(..., description="Human label, e.g. 'sales-1'")
-    li_at: str | None = Field(None, description="LinkedIn li_at cookie value (required if cookies not provided)")
+    li_at: str | None = Field(
+        None,
+        description="LinkedIn li_at cookie value (required if cookies not provided)",
+    )
     jsessionid: str | None = Field(None, description="Optional JSESSIONID cookie value")
     cookies: str | None = Field(
         None,
@@ -47,12 +50,16 @@ class AccountCreateIn(BaseModel):
     def to_account_auth(self) -> AccountAuth:
         if self.cookies:
             return cookies_to_account_auth(self.cookies)
-        return AccountAuth(li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid)
+        return AccountAuth(
+            li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid
+        )
 
 
 class SendIn(BaseModel):
     account_id: int
-    recipient: str = Field(..., min_length=1, description="Recipient id (profile URN or conversation id)")
+    recipient: str = Field(
+        ..., min_length=1, description="Recipient id (profile URN or conversation id)"
+    )
     text: str = Field(..., min_length=1, max_length=8000, description="Message body")
     idempotency_key: str | None = None
 
@@ -81,7 +88,10 @@ def create_account(body: AccountCreateIn):
         raise HTTPException(status_code=422, detail=str(exc))
     proxy = ProxyConfig(url=body.proxy_url) if body.proxy_url else None
     account_id = storage.create_account(label=body.label, auth=auth, proxy=proxy)
-    logger.info("Account created: %s", redact_for_log({"account_id": account_id, "label": body.label}))
+    logger.info(
+        "Account created: %s",
+        redact_for_log({"account_id": account_id, "label": body.label}),
+    )
     return {"account_id": account_id}
 
 
@@ -136,6 +146,15 @@ def sync_account(body: SyncIn):
             status_code=501,
             detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
         ) from None
+    except Exception as exc:
+        import httpx as _httpx
+
+        if isinstance(exc, _httpx.HTTPStatusError):
+            code = exc.response.status_code
+            if code in (301, 302, 303, 307, 308):
+                raise HTTPException(status_code=401, detail=str(exc)) from None
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        raise
 
 
 @app.post("/send")
