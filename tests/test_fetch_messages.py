@@ -192,6 +192,18 @@ class TestParseGraphqlMessages:
         msgs, _ = _parse_graphql_messages(data, "urn:conv:1")
         assert msgs[0].sender is None
 
+    def test_deduplicates_by_message_id(self):
+        """Duplicate message IDs within a page are returned only once."""
+        dup = _msg_element("urn:msg:dup", text="first")
+        dup2 = _msg_element("urn:msg:dup", text="second")
+        unique = _msg_element("urn:msg:unique")
+        data = _graphql_messages([dup, dup2, unique])
+        msgs, _ = _parse_graphql_messages(data, "urn:conv:1")
+        assert len(msgs) == 2
+        ids = [m.platform_message_id for m in msgs]
+        assert ids.count("urn:msg:dup") == 1
+        assert "urn:msg:unique" in ids
+
 
 # -- Integration: fetch_messages with mocked HTTP ----------------------------
 
@@ -428,3 +440,25 @@ class TestFetchMessages:
 
         # No new httpx.Client was created — both calls used the injected mock
         assert provider._client is mock_client
+
+    def test_handles_non_json_response(self, provider, mock_client):
+        """HTML error page (non-JSON) doesn't crash — returns empty."""
+        provider._client = mock_client
+
+        html_resp = MagicMock(spec=httpx.Response)
+        html_resp.status_code = 200
+        html_resp.is_redirect = False
+        html_resp.headers = {}
+        html_resp.text = "<html>Cloudflare error</html>"
+        html_resp.json.side_effect = ValueError("No JSON")
+        html_resp.raise_for_status = MagicMock()
+
+        mock_client.get.return_value = html_resp
+
+        msgs, cursor = provider.fetch_messages(
+            platform_thread_id="urn:li:conv:1",
+            cursor=None,
+        )
+
+        assert msgs == []
+        assert cursor is None

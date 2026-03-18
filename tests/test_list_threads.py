@@ -602,6 +602,25 @@ class TestListThreads:
 
         mock_client.close.assert_called_once()
 
+    def test_handles_non_json_response(self, provider, mock_client):
+        """HTML error page (non-JSON) doesn't crash — treated as empty."""
+        provider._client = mock_client
+        me_resp = _me_response()
+
+        html_resp = MagicMock(spec=httpx.Response)
+        html_resp.status_code = 200
+        html_resp.is_redirect = False
+        html_resp.headers = {}
+        html_resp.text = "<html>Cloudflare error</html>"
+        html_resp.json.side_effect = ValueError("No JSON")
+        html_resp.raise_for_status = MagicMock()
+
+        mock_client.get.side_effect = [me_resp, html_resp]
+
+        threads = provider.list_threads()
+
+        assert threads == []
+
 
 # -- Edge case: _extract_thread_title variations -----------------------------
 

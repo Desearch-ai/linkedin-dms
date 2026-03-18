@@ -415,10 +415,12 @@ def _parse_graphql_messages(
         next_cursor = sync_token
 
     messages: list[LinkedInMessage] = []
+    seen_ids: set[str] = set()
     for elem in elements:
         msg_urn = elem.get("entityUrn", elem.get("backendUrn", ""))
-        if not msg_urn:
+        if not msg_urn or msg_urn in seen_ids:
             continue
+        seen_ids.add(msg_urn)
 
         body = elem.get("body", {})
         text = (
@@ -709,7 +711,11 @@ class LinkedInProvider:
                 client, full_url, headers=headers, cookies=cookies
             )
             self._check_response(resp)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                logger.debug("list_threads: non-JSON response on page %d", page)
+                break
             page_threads = _parse_graphql_threads(data)
             if not page_threads:
                 break
@@ -786,7 +792,13 @@ class LinkedInProvider:
             client, full_url, headers=headers, cookies=cookies
         )
         self._check_response(resp)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            logger.debug(
+                "fetch_messages: non-JSON response for %s", platform_thread_id
+            )
+            return [], None
 
         messages, next_cursor = _parse_graphql_messages(data, platform_thread_id)
         return messages, next_cursor
