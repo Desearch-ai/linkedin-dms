@@ -17,7 +17,6 @@ from libs.providers.linkedin.provider import (
     _MAX_PAGES,
     _MESSAGES_QID_RE,
     _RETRY_MAX_ATTEMPTS,
-    _RETRYABLE_STATUS_CODES,
     _SCRIPT_SRC_RE,
     LinkedInProvider,
     LinkedInThread,
