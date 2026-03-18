@@ -190,13 +190,36 @@ When implementing account auth handling:
 
 ## Safe logging rules
 
-The service ships `libs/core/redaction.py` to prevent secrets from leaking into logs.
+The service uses a **defense-in-depth** approach to prevent secrets from leaking
+into logs, HTTP responses, or tracebacks. Three layers work together:
 
-### How it works
+### Layer 1 — Source-level (`__repr__` overrides)
+
+`AccountAuth`, `ProxyConfig`, and `LinkedInProvider` override `__repr__` and
+`__str__` so secrets are never exposed through `print()`, f-strings, tracebacks,
+or any other string conversion — even without the logging filter.
+
+```python
+>>> repr(AccountAuth(li_at="secret", jsessionid="ajax:tok"))
+"AccountAuth(li_at='[REDACTED]', jsessionid='[REDACTED]')"
+```
+
+### Layer 2 — Filter-level (`SecretRedactingFilter`)
 
 `configure_logging()` (called automatically in `apps/api/main.py`) installs a
 `SecretRedactingFilter` on the root logger. Every log record passes through it
-before being emitted — no manual opt-in required per call site.
+before being emitted — no manual opt-in required per call site. The filter scrubs:
+
+- **Message strings** via `redact_string()` (inline patterns)
+- **Structured args** (dicts) via `redact_for_log()`
+- **Dataclass args** (e.g. `AccountAuth`) via `dataclasses.asdict()` + redaction
+- **Exception tracebacks** (`exc_text` and `exc_info`) to catch secrets in stack traces
+
+### Layer 3 — API-level (HTTP response sanitization)
+
+All `HTTPException` detail strings in `apps/api/main.py` are passed through
+`redact_string()` before being returned to clients, preventing secrets from
+leaking through error responses.
 
 ### Redacted keys (structured data)
 
@@ -211,7 +234,7 @@ logger.info("Account created: %s", redact_for_log({"account_id": 1, "li_at": "SE
 
 The following dict keys are always redacted (case-insensitive):
 `li_at`, `jsessionid`, `auth_json`, `cookie`, `cookies`, `authorization`,
-`password`, `secret`, `token`, `api_key`, `apikey`, `proxy_url`
+`password`, `secret`, `token`, `api_key`, `apikey`, `proxy_url`, `url`
 
 ### Redacted patterns (inline strings)
 
@@ -219,10 +242,12 @@ Inline secrets in log message strings are scrubbed by `redact_string()` and
 automatically by the logging filter. Examples of patterns that get redacted:
 
 ```
-li_at=SECRETVALUE          →  li_at=[REDACTED]
-JSESSIONID: ajax:csrf123   →  JSESSIONID: [REDACTED]
-Authorization=Bearer xxx   →  Authorization=[REDACTED]
-password=hunter2           →  password=[REDACTED]
+li_at=SECRETVALUE                →  li_at=[REDACTED]
+JSESSIONID: ajax:csrf123         →  JSESSIONID: [REDACTED]
+Authorization: Bearer eyJhbGc    →  Authorization: [REDACTED]
+Authorization=Basic dXNlcjpw     →  Authorization=[REDACTED]
+password=hunter2                 →  password=[REDACTED]
+proxy_url=http://u:p@host:8080   →  proxy_url=[REDACTED]
 ```
 
 ### Rules for contributors
@@ -232,6 +257,7 @@ password=hunter2           →  password=[REDACTED]
 3. **Never log request bodies verbatim** — extract only the non-sensitive fields.
 4. **Do not disable the logging filter** — `configure_logging()` must remain in `main.py`.
 5. **Do not add `li_at` / `jsessionid` to error messages** — use account_id instead.
+6. **Always override `__repr__`** on any new dataclass that holds secrets.
 
 ## Roadmap
 

@@ -14,6 +14,12 @@ class ProxyConfig:
 
     url: str  # e.g. http://user:pass@host:port or socks5://host:port
 
+    def __repr__(self) -> str:
+        return "ProxyConfig(url='[REDACTED]')"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
 
 @dataclass(frozen=True)
 class AccountAuth:
@@ -29,6 +35,12 @@ class AccountAuth:
 
     li_at: str
     jsessionid: Optional[str] = None
+
+    def __repr__(self) -> str:
+        return "AccountAuth(li_at='[REDACTED]', jsessionid='[REDACTED]')"
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 @dataclass(frozen=True)

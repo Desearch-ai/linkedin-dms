@@ -46,6 +46,13 @@ class LinkedInProvider:
         self.auth = auth
         self.proxy = proxy
 
+    def __repr__(self) -> str:
+        proxy_repr = "'[REDACTED]'" if self.proxy else "None"
+        return f"LinkedInProvider(auth='[REDACTED]', proxy={proxy_repr})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
     def list_threads(self) -> list[LinkedInThread]:
         """Return list of DM threads for this account.
 
