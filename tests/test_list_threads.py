@@ -11,10 +11,13 @@ from libs.core.models import AccountAuth, ProxyConfig
 from libs.providers.linkedin.provider import (
     _CONVERSATIONS_QID_RE,
     _DEFAULT_COUNT,
+    _DELAY_BETWEEN_PAGES_S,
     _FALLBACK_CONVERSATIONS_QUERY_ID,
     _FALLBACK_MESSAGES_QUERY_ID,
     _MAX_PAGES,
     _MESSAGES_QID_RE,
+    _RETRY_MAX_ATTEMPTS,
+    _RETRYABLE_STATUS_CODES,
     _SCRIPT_SRC_RE,
     LinkedInProvider,
     LinkedInThread,
@@ -42,6 +45,14 @@ def provider(auth):
 @pytest.fixture
 def provider_with_proxy(auth):
     return LinkedInProvider(auth=auth, proxy=ProxyConfig(url="http://proxy:8080"))
+
+
+@pytest.fixture
+def mock_client():
+    """A mock httpx.Client for injection into provider._client."""
+    client = MagicMock(spec=httpx.Client)
+    client.is_closed = False
+    return client
 
 
 @pytest.fixture(autouse=True)
@@ -305,26 +316,25 @@ class TestBuildHeaders:
 
 
 class TestListThreads:
-    def test_single_page(self, provider):
+    def test_single_page(self, provider, mock_client):
         """When LinkedIn returns fewer than DEFAULT_COUNT, no second request."""
+        provider._client = mock_client
         elems = [
             _graphql_conv_element(f"urn:li:msg_conversation:{i}") for i in range(3)
         ]
         me_resp = _me_response()
         graphql_resp = _ok_response(_graphql_conversations(elems))
+        mock_client.get.side_effect = [me_resp, graphql_resp]
 
-        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
-            client_instance = MockClient.return_value.__enter__.return_value
-            client_instance.get.side_effect = [me_resp, graphql_resp]
-
-            threads = provider.list_threads()
+        threads = provider.list_threads()
 
         assert len(threads) == 3
         assert all(isinstance(t, LinkedInThread) for t in threads)
-        assert client_instance.get.call_count == 2  # /me + 1 graphql page
+        assert mock_client.get.call_count == 2  # /me + 1 graphql page
 
-    def test_pagination_two_pages(self, provider):
+    def test_pagination_two_pages(self, provider, mock_client):
         """When first page is full, fetches second page."""
+        provider._client = mock_client
         page1_elems = [
             _graphql_conv_element(f"urn:conv:{i}", last_activity_at=2000 - i)
             for i in range(_DEFAULT_COUNT)
@@ -339,48 +349,42 @@ class TestListThreads:
         me_resp = _me_response()
         resp1 = _ok_response(_graphql_conversations(page1_elems))
         resp2 = _ok_response(_graphql_conversations(page2_elems))
+        mock_client.get.side_effect = [me_resp, resp1, resp2]
 
-        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
-            client_instance = MockClient.return_value.__enter__.return_value
-            client_instance.get.side_effect = [me_resp, resp1, resp2]
-
+        with patch("libs.providers.linkedin.provider.time.sleep"):
             threads = provider.list_threads()
 
         assert len(threads) == _DEFAULT_COUNT + 5
-        assert client_instance.get.call_count == 3  # /me + 2 graphql pages
+        assert mock_client.get.call_count == 3  # /me + 2 graphql pages
 
-    def test_empty_inbox(self, provider):
+    def test_empty_inbox(self, provider, mock_client):
+        provider._client = mock_client
         me_resp = _me_response()
         graphql_resp = _ok_response(_graphql_conversations([]))
+        mock_client.get.side_effect = [me_resp, graphql_resp]
 
-        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
-            client_instance = MockClient.return_value.__enter__.return_value
-            client_instance.get.side_effect = [me_resp, graphql_resp]
-
-            threads = provider.list_threads()
+        threads = provider.list_threads()
 
         assert threads == []
 
-    def test_http_error_propagates(self, provider):
+    def test_http_error_propagates(self, provider, mock_client):
         """HTTP errors from LinkedIn should bubble up, not be swallowed."""
-        mock_resp = MagicMock(spec=httpx.Response)
-        mock_resp.status_code = 403
-        mock_resp.is_redirect = False
-        mock_resp.headers = {}
-        mock_resp.text = "Forbidden"
-        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        provider._client = mock_client
+        error_resp = MagicMock(spec=httpx.Response)
+        error_resp.status_code = 403
+        error_resp.is_redirect = False
+        error_resp.headers = {}
+        error_resp.text = "Forbidden"
+        error_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
             "403 Forbidden",
             request=MagicMock(),
-            response=mock_resp,
+            response=error_resp,
         )
+        # /me fails with 403
+        mock_client.get.return_value = error_resp
 
-        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
-            client_instance = MockClient.return_value.__enter__.return_value
-            # /me fails with 403
-            client_instance.get.return_value = mock_resp
-
-            with pytest.raises(httpx.HTTPStatusError):
-                provider.list_threads()
+        with pytest.raises(httpx.HTTPStatusError):
+            provider.list_threads()
 
     def test_requires_jsessionid(self):
         """list_threads raises ValueError when JSESSIONID is missing."""
@@ -395,7 +399,8 @@ class TestListThreads:
         graphql_resp = _ok_response(_graphql_conversations([]))
 
         with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
-            client_instance = MockClient.return_value.__enter__.return_value
+            client_instance = MockClient.return_value
+            client_instance.is_closed = False
             client_instance.get.side_effect = [me_resp, graphql_resp]
 
             provider_with_proxy.list_threads()
@@ -406,26 +411,25 @@ class TestListThreads:
             follow_redirects=False,
         )
 
-    def test_cookies_not_in_headers(self, provider):
+    def test_cookies_not_in_headers(self, provider, mock_client):
         """Cookies are passed via the cookies param, not leaked into headers."""
+        provider._client = mock_client
         me_resp = _me_response()
         graphql_resp = _ok_response(_graphql_conversations([]))
+        mock_client.get.side_effect = [me_resp, graphql_resp]
 
-        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
-            client_instance = MockClient.return_value.__enter__.return_value
-            client_instance.get.side_effect = [me_resp, graphql_resp]
-
-            provider.list_threads()
+        provider.list_threads()
 
         # Check the last call (graphql) — cookies should be in the cookies param
-        call_kwargs = client_instance.get.call_args.kwargs
+        call_kwargs = mock_client.get.call_args.kwargs
         headers = call_kwargs["headers"]
         assert "li_at" not in str(headers.get("cookie", ""))
         assert "fake-li-at-cookie-value" not in str(headers)
         assert call_kwargs["cookies"]["li_at"] == "fake-li-at-cookie-value"
 
-    def test_max_pages_safety_limit(self, provider):
+    def test_max_pages_safety_limit(self, provider, mock_client):
         """Pagination stops after _MAX_PAGES even if more data exists."""
+        provider._client = mock_client
 
         def make_full_page(base_ts):
             return [
@@ -442,15 +446,162 @@ class TestListThreads:
             ts = base - (p * _DEFAULT_COUNT)
             pages.append(_ok_response(_graphql_conversations(make_full_page(ts))))
 
-        with patch("libs.providers.linkedin.provider.httpx.Client") as MockClient:
-            client_instance = MockClient.return_value.__enter__.return_value
-            client_instance.get.side_effect = [me_resp] + pages
+        mock_client.get.side_effect = [me_resp] + pages
 
+        with patch("libs.providers.linkedin.provider.time.sleep"):
             threads = provider.list_threads()
 
         # /me + _MAX_PAGES graphql calls
-        assert client_instance.get.call_count == 1 + _MAX_PAGES
+        assert mock_client.get.call_count == 1 + _MAX_PAGES
         assert len(threads) == _MAX_PAGES * _DEFAULT_COUNT
+
+    def test_deduplicates_across_pages(self, provider, mock_client):
+        """Same entityUrn on two pages is returned only once."""
+        provider._client = mock_client
+        page1_elems = [
+            _graphql_conv_element("urn:conv:dup", last_activity_at=2000),
+            _graphql_conv_element("urn:conv:1", last_activity_at=1999),
+        ] + [
+            _graphql_conv_element(f"urn:conv:p1-{i}", last_activity_at=1998 - i)
+            for i in range(_DEFAULT_COUNT - 2)
+        ]
+        page2_elems = [
+            _graphql_conv_element("urn:conv:dup", last_activity_at=2000),
+            _graphql_conv_element("urn:conv:2", last_activity_at=900),
+        ]
+
+        me_resp = _me_response()
+        resp1 = _ok_response(_graphql_conversations(page1_elems))
+        resp2 = _ok_response(_graphql_conversations(page2_elems))
+        mock_client.get.side_effect = [me_resp, resp1, resp2]
+
+        with patch("libs.providers.linkedin.provider.time.sleep"):
+            threads = provider.list_threads()
+
+        urns = [t.platform_thread_id for t in threads]
+        assert urns.count("urn:conv:dup") == 1
+        assert "urn:conv:1" in urns
+        assert "urn:conv:2" in urns
+
+    def test_sleeps_between_pages(self, provider, mock_client):
+        """Rate limiting: sleeps between pagination requests."""
+        provider._client = mock_client
+        page1_elems = [
+            _graphql_conv_element(f"urn:conv:{i}", last_activity_at=2000 - i)
+            for i in range(_DEFAULT_COUNT)
+        ]
+        page2_elems = [_graphql_conv_element("urn:conv:last", last_activity_at=500)]
+
+        me_resp = _me_response()
+        resp1 = _ok_response(_graphql_conversations(page1_elems))
+        resp2 = _ok_response(_graphql_conversations(page2_elems))
+        mock_client.get.side_effect = [me_resp, resp1, resp2]
+
+        with patch("libs.providers.linkedin.provider.time.sleep") as mock_sleep:
+            provider.list_threads()
+
+        mock_sleep.assert_called_once_with(_DELAY_BETWEEN_PAGES_S)
+
+    def test_no_sleep_on_single_page(self, provider, mock_client):
+        """No rate-limit sleep when only one page is fetched."""
+        provider._client = mock_client
+        me_resp = _me_response()
+        graphql_resp = _ok_response(
+            _graphql_conversations([_graphql_conv_element("urn:conv:1")])
+        )
+        mock_client.get.side_effect = [me_resp, graphql_resp]
+
+        with patch("libs.providers.linkedin.provider.time.sleep") as mock_sleep:
+            provider.list_threads()
+
+        mock_sleep.assert_not_called()
+
+    def test_retries_on_429_then_succeeds(self, provider, mock_client):
+        """Retries transient 429 and succeeds on next attempt."""
+        provider._client = mock_client
+        me_resp = _me_response()
+
+        resp_429 = MagicMock(spec=httpx.Response)
+        resp_429.status_code = 429
+        resp_429.headers = {}
+        resp_429.request = MagicMock()
+
+        graphql_resp = _ok_response(
+            _graphql_conversations([_graphql_conv_element("urn:conv:1")])
+        )
+        mock_client.get.side_effect = [me_resp, resp_429, graphql_resp]
+
+        with patch("libs.providers.linkedin.provider.time.sleep"):
+            threads = provider.list_threads()
+
+        assert len(threads) == 1
+
+    def test_retry_honours_retry_after_header(self, provider, mock_client):
+        """Retry delay respects Retry-After header from LinkedIn."""
+        provider._client = mock_client
+        me_resp = _me_response()
+
+        resp_429 = MagicMock(spec=httpx.Response)
+        resp_429.status_code = 429
+        resp_429.headers = {"Retry-After": "10"}
+        resp_429.request = MagicMock()
+
+        graphql_resp = _ok_response(_graphql_conversations([]))
+        mock_client.get.side_effect = [me_resp, resp_429, graphql_resp]
+
+        with patch("libs.providers.linkedin.provider.time.sleep") as mock_sleep:
+            provider.list_threads()
+
+        # The retry sleep should be at least 10s (from Retry-After)
+        assert mock_sleep.call_args[0][0] >= 10.0
+
+    def test_exhausts_retries_on_503(self, provider, mock_client):
+        """Raises after exhausting retry attempts on persistent 5xx."""
+        provider._client = mock_client
+        me_resp = _me_response()
+
+        resp_503 = MagicMock(spec=httpx.Response)
+        resp_503.status_code = 503
+        resp_503.headers = {}
+        resp_503.request = MagicMock()
+
+        mock_client.get.side_effect = [me_resp] + [resp_503] * _RETRY_MAX_ATTEMPTS
+
+        with patch("libs.providers.linkedin.provider.time.sleep"):
+            with pytest.raises(httpx.HTTPStatusError):
+                provider.list_threads()
+
+    def test_no_retry_on_403(self, provider, mock_client):
+        """Non-retryable errors (403) are not retried."""
+        provider._client = mock_client
+        me_resp = _me_response()
+
+        resp_403 = MagicMock(spec=httpx.Response)
+        resp_403.status_code = 403
+        resp_403.is_redirect = False
+        resp_403.headers = {}
+        resp_403.text = "Forbidden"
+        resp_403.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "403", request=MagicMock(), response=resp_403
+        )
+        mock_client.get.side_effect = [me_resp, resp_403]
+
+        with patch("libs.providers.linkedin.provider.time.sleep") as mock_sleep:
+            with pytest.raises(httpx.HTTPStatusError):
+                provider.list_threads()
+
+        # time.sleep should NOT be called for retry (only _DELAY_BETWEEN_PAGES_S is possible)
+        mock_sleep.assert_not_called()
+
+    def test_context_manager_closes_client(self, auth):
+        """Provider used as context manager closes the httpx client."""
+        mock_client = MagicMock(spec=httpx.Client)
+        mock_client.is_closed = False
+
+        with LinkedInProvider(auth=auth) as p:
+            p._client = mock_client
+
+        mock_client.close.assert_called_once()
 
 
 # -- Edge case: _extract_thread_title variations -----------------------------

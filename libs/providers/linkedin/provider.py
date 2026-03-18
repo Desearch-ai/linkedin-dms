@@ -82,6 +82,14 @@ _DEFAULT_COUNT = 20
 # Safety limit to prevent runaway pagination on very large inboxes
 _MAX_PAGES = 50  # 50 * 20 = 1000 threads max
 
+# Retry configuration for transient errors (429 rate-limit, 5xx server errors)
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_BASE_DELAY_S = 2.0
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# Rate limiting: pause between pagination requests to avoid triggering LinkedIn's limiter
+_DELAY_BETWEEN_PAGES_S = 1.5
+
 
 def _discover_query_ids(
     cookies: dict[str, str],
@@ -483,6 +491,33 @@ class LinkedInProvider:
     def __init__(self, *, auth: AccountAuth, proxy: Optional[ProxyConfig] = None):
         self.auth = auth
         self.proxy = proxy
+        self._client: Optional[httpx.Client] = None
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def _get_client(self) -> httpx.Client:
+        """Return a reusable httpx.Client (lazy-initialized)."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(
+                proxy=self._get_proxy_url(),
+                timeout=30.0,
+                follow_redirects=False,
+            )
+        return self._client
+
+    def close(self) -> None:
+        """Close the underlying HTTP client. Safe to call multiple times."""
+        if self._client is not None and not self._client.is_closed:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> LinkedInProvider:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    # -- header / cookie builders --------------------------------------------
 
     def _build_headers(
         self, *, accept: str = "application/vnd.linkedin.normalized+json+2.1"
@@ -532,6 +567,45 @@ class LinkedInProvider:
                 body_preview,
             )
             resp.raise_for_status()
+
+    def _get_with_retry(
+        self, client: httpx.Client, url: str, **kwargs: Any
+    ) -> httpx.Response:
+        """GET with retry on transient errors (429, 5xx).
+
+        Exponential backoff: 2s, 4s, 8s.  Honours Retry-After on 429.
+        Non-retryable status codes are returned immediately for the caller
+        to handle via _check_response().
+        """
+        last_exc: Optional[httpx.HTTPStatusError] = None
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            resp = client.get(url, **kwargs)
+            if resp.status_code not in _RETRYABLE_STATUS_CODES:
+                return resp
+            last_exc = httpx.HTTPStatusError(
+                str(resp.status_code),
+                request=resp.request,
+                response=resp,
+            )
+            if attempt == _RETRY_MAX_ATTEMPTS - 1:
+                break
+            delay = _RETRY_BASE_DELAY_S * (2 ** attempt)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except (TypeError, ValueError):
+                        pass
+            logger.debug(
+                "Retrying: %d from LinkedIn, attempt %d/%d, waiting %.1fs",
+                resp.status_code,
+                attempt + 1,
+                _RETRY_MAX_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     def _resolve_profile_urn(
         self, client: httpx.Client, cookies: dict[str, str]
@@ -593,7 +667,9 @@ class LinkedInProvider:
         """Fetch all DM conversation threads via LinkedIn's GraphQL messaging API.
 
         Uses the voyagerMessagingGraphQL endpoint with cursor-based pagination
-        (lastUpdatedBefore timestamp).
+        (lastUpdatedBefore timestamp).  Deduplicates threads across pages.
+        Retries transient errors (429, 5xx) with exponential backoff.
+        Sleeps between pages to avoid triggering LinkedIn's rate limiter.
         """
         if not self.auth.jsessionid:
             raise ValueError(
@@ -603,56 +679,56 @@ class LinkedInProvider:
 
         headers = self._build_headers(accept="application/graphql")
         cookies = self._build_cookies()
-        proxy_url = self._get_proxy_url()
 
-        conv_query_id, _ = _discover_query_ids(cookies, headers, proxy_url)
+        conv_query_id, _ = _discover_query_ids(
+            cookies, headers, self._get_proxy_url()
+        )
+
+        client = self._get_client()
+        mailbox_urn = self._resolve_profile_urn(client, cookies)
+        logger.info("Resolved mailbox URN: %s", mailbox_urn)
 
         all_threads: list[LinkedInThread] = []
+        seen_urns: set[str] = set()
+        encoded_urn = quote(mailbox_urn, safe="")
+        last_activity_before = int(time.time() * 1000)
         page = 0
 
-        with httpx.Client(
-            proxy=proxy_url,
-            timeout=30.0,
-            follow_redirects=False,
-        ) as client:
-            mailbox_urn = self._resolve_profile_urn(client, cookies)
-            logger.info("Resolved mailbox URN: %s", mailbox_urn)
+        while page < _MAX_PAGES:
+            variables = (
+                f"(query:(predicateUnions:List("
+                f"(conversationCategoryPredicate:(category:PRIMARY_INBOX)))),"
+                f"count:{_DEFAULT_COUNT},"
+                f"mailboxUrn:{encoded_urn},"
+                f"lastUpdatedBefore:{last_activity_before})"
+            )
+            full_url = (
+                f"{_GRAPHQL_MSG_URL}?queryId={conv_query_id}&variables={variables}"
+            )
+            resp = self._get_with_retry(
+                client, full_url, headers=headers, cookies=cookies
+            )
+            self._check_response(resp)
+            data = resp.json()
+            page_threads = _parse_graphql_threads(data)
+            if not page_threads:
+                break
 
-            encoded_urn = quote(mailbox_urn, safe="")
-            last_activity_before = int(time.time() * 1000)
+            for t in page_threads:
+                if t.platform_thread_id not in seen_urns:
+                    seen_urns.add(t.platform_thread_id)
+                    all_threads.append(t)
 
-            while page < _MAX_PAGES:
-                variables = (
-                    f"(query:(predicateUnions:List("
-                    f"(conversationCategoryPredicate:(category:PRIMARY_INBOX)))),"
-                    f"count:{_DEFAULT_COUNT},"
-                    f"mailboxUrn:{encoded_urn},"
-                    f"lastUpdatedBefore:{last_activity_before})"
-                )
-                full_url = (
-                    f"{_GRAPHQL_MSG_URL}?queryId={conv_query_id}&variables={variables}"
-                )
-                resp = client.get(
-                    full_url,
-                    headers=headers,
-                    cookies=cookies,
-                )
-                self._check_response(resp)
-                data = resp.json()
-                page_threads = _parse_graphql_threads(data)
-                if not page_threads:
-                    break
-                all_threads.extend(page_threads)
+            if len(page_threads) < _DEFAULT_COUNT:
+                break
 
-                if len(page_threads) < _DEFAULT_COUNT:
-                    break
+            oldest_ts = _get_oldest_timestamp(data)
+            if oldest_ts is None or oldest_ts >= last_activity_before:
+                break
+            last_activity_before = oldest_ts
 
-                oldest_ts = _get_oldest_timestamp(data)
-                if oldest_ts is None or oldest_ts >= last_activity_before:
-                    break
-                last_activity_before = oldest_ts
-
-                page += 1
+            time.sleep(_DELAY_BETWEEN_PAGES_S)
+            page += 1
 
         if page >= _MAX_PAGES:
             logger.warning(
@@ -675,19 +751,25 @@ class LinkedInProvider:
         Args:
           platform_thread_id: conversation URN from list_threads
           cursor: opaque syncToken from a previous call (None = initial fetch)
-          limit: unused for this endpoint (LinkedIn controls page size)
+          limit: maximum number of messages to request (1–200)
 
         Returns:
           (messages, next_cursor) where next_cursor is a syncToken or None.
+
+        Raises:
+          ValueError: If JSESSIONID is missing or limit is out of range.
         """
         if not self.auth.jsessionid:
             raise ValueError("JSESSIONID is required for LinkedIn API requests.")
+        if limit < 1 or limit > 200:
+            raise ValueError(f"limit must be between 1 and 200, got {limit}")
 
         headers = self._build_headers(accept="application/graphql")
         cookies = self._build_cookies()
-        proxy_url = self._get_proxy_url()
 
-        _, msg_query_id = _discover_query_ids(cookies, headers, proxy_url)
+        _, msg_query_id = _discover_query_ids(
+            cookies, headers, self._get_proxy_url()
+        )
 
         encoded_conv = quote(platform_thread_id, safe="")
 
@@ -699,14 +781,12 @@ class LinkedInProvider:
 
         full_url = f"{_GRAPHQL_MSG_URL}?queryId={msg_query_id}&variables={variables}"
 
-        with httpx.Client(
-            proxy=proxy_url,
-            timeout=30.0,
-            follow_redirects=False,
-        ) as client:
-            resp = client.get(full_url, headers=headers, cookies=cookies)
-            self._check_response(resp)
-            data = resp.json()
+        client = self._get_client()
+        resp = self._get_with_retry(
+            client, full_url, headers=headers, cookies=cookies
+        )
+        self._check_response(resp)
+        data = resp.json()
 
         messages, next_cursor = _parse_graphql_messages(data, platform_thread_id)
         return messages, next_cursor

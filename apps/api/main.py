@@ -67,7 +67,7 @@ class SendIn(BaseModel):
 
 class SyncIn(BaseModel):
     account_id: int
-    limit_per_thread: int = Field(50, ge=1, le=500, description="Messages per page")
+    limit_per_thread: int = Field(50, ge=1, le=200, description="Messages per page")
     max_pages_per_thread: int | None = Field(
         1,
         ge=1,
