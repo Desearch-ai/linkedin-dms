@@ -340,6 +340,8 @@ def test_sync_endpoint_501_when_fetch_messages_not_implemented(storage, account_
     from apps.api.main import app
 
     provider = MagicMock()
+    provider.__enter__ = MagicMock(return_value=provider)
+    provider.__exit__ = MagicMock(return_value=False)
     provider.list_threads.return_value = [
         LinkedInThread(platform_thread_id="t1", title=None, raw=None),
     ]
@@ -364,6 +366,8 @@ def test_sync_endpoint_returns_detailed_counts(storage, account_id):
     from libs.providers.linkedin.provider import LinkedInThread, LinkedInMessage
 
     provider = MagicMock()
+    provider.__enter__ = MagicMock(return_value=provider)
+    provider.__exit__ = MagicMock(return_value=False)
     provider.list_threads.return_value = [
         LinkedInThread(platform_thread_id="t1", title=None, raw=None),
     ]

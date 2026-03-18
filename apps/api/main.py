@@ -126,32 +126,32 @@ def sync_account(body: SyncIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
-    try:
-        result: SyncResult = run_sync(
-            account_id=body.account_id,
-            storage=storage,
-            provider=provider,
-            limit_per_thread=body.limit_per_thread,
-            max_pages_per_thread=body.max_pages_per_thread,
-        )
-        return {
-            "ok": True,
-            "synced_threads": result.synced_threads,
-            "messages_inserted": result.messages_inserted,
-            "messages_skipped_duplicate": result.messages_skipped_duplicate,
-            "pages_fetched": result.pages_fetched,
-        }
-    except NotImplementedError:
-        raise HTTPException(
-            status_code=501,
-            detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
-        ) from None
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        if code in (301, 302, 303, 307, 308):
-            raise HTTPException(status_code=401, detail=str(exc)) from None
-        raise HTTPException(status_code=502, detail=str(exc)) from None
+    with LinkedInProvider(auth=auth, proxy=proxy) as provider:
+        try:
+            result: SyncResult = run_sync(
+                account_id=body.account_id,
+                storage=storage,
+                provider=provider,
+                limit_per_thread=body.limit_per_thread,
+                max_pages_per_thread=body.max_pages_per_thread,
+            )
+            return {
+                "ok": True,
+                "synced_threads": result.synced_threads,
+                "messages_inserted": result.messages_inserted,
+                "messages_skipped_duplicate": result.messages_skipped_duplicate,
+                "pages_fetched": result.pages_fetched,
+            }
+        except NotImplementedError:
+            raise HTTPException(
+                status_code=501,
+                detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
+            ) from None
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code in (301, 302, 303, 307, 308):
+                raise HTTPException(status_code=401, detail=str(exc)) from None
+            raise HTTPException(status_code=502, detail=str(exc)) from None
 
 
 @app.post("/send")
@@ -161,19 +161,19 @@ def send_message(body: SendIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
-    try:
-        platform_message_id = run_send(
-            account_id=body.account_id,
-            storage=storage,
-            provider=provider,
-            recipient=body.recipient,
-            text=body.text,
-            idempotency_key=body.idempotency_key,
-        )
-        return {"ok": True, "platform_message_id": platform_message_id}
-    except NotImplementedError:
-        raise HTTPException(
-            status_code=501,
-            detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
-        ) from None
+    with LinkedInProvider(auth=auth, proxy=proxy) as provider:
+        try:
+            platform_message_id = run_send(
+                account_id=body.account_id,
+                storage=storage,
+                provider=provider,
+                recipient=body.recipient,
+                text=body.text,
+                idempotency_key=body.idempotency_key,
+            )
+            return {"ok": True, "platform_message_id": platform_message_id}
+        except NotImplementedError:
+            raise HTTPException(
+                status_code=501,
+                detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
+            ) from None
