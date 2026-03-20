@@ -38,6 +38,9 @@ def validate_fernet_key(raw: str) -> bytes:
 
 def _get_fernet_key() -> Optional[bytes]:
     """Read and validate the Fernet key from environment."""
+    from libs.core.redaction import configure_logging
+    configure_logging()  # ensure redaction filter is active before we log
+
     global _warned_no_key
     raw = os.environ.get("DESEARCH_ENCRYPTION_KEY", "").strip()
     if not raw:

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
 from libs.core.job_runner import SyncResult, run_send, run_sync
 from libs.core.models import AccountAuth, ProxyConfig
-from libs.core.redaction import configure_logging, redact_for_log
+from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
 
@@ -86,7 +86,7 @@ def create_account(body: AccountCreateIn):
     try:
         auth = body.to_account_auth()
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=422, detail=redact_string(str(exc)))
     proxy = ProxyConfig(url=body.proxy_url) if body.proxy_url else None
     account_id = storage.create_account(label=body.label, auth=auth, proxy=proxy)
     logger.info(
@@ -125,7 +125,7 @@ def sync_account(body: SyncIn):
         auth = storage.get_account_auth(body.account_id)
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
     with LinkedInProvider(auth=auth, proxy=proxy) as provider:
         try:
             result: SyncResult = run_sync(
@@ -160,7 +160,7 @@ def send_message(body: SendIn):
         auth = storage.get_account_auth(body.account_id)
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
     with LinkedInProvider(auth=auth, proxy=proxy) as provider:
         try:
             platform_message_id = run_send(

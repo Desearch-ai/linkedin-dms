@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from typing import Any
@@ -26,6 +27,7 @@ _SECRET_KEYS = frozenset({
     "api_key",
     "apikey",
     "proxy_url",
+    "url",
 })
 
 _REDACTED = "[REDACTED]"
@@ -35,10 +37,11 @@ _REDACTED = "[REDACTED]"
 _SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(li_at\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(jsessionid\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
-    re.compile(r"(authorization\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
+    re.compile(r"(authorization\s*[=:]\s*)((?:Bearer|Basic|Token)\s+[^\s;,\"'}{]+|[^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(password\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(api_key\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(token\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
+    re.compile(r"(proxy_url\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
 ]
 
 
@@ -99,7 +102,9 @@ class SecretRedactingFilter(logging.Filter):
     """Logging filter that scrubs secrets from log messages automatically.
 
     Attach to any handler or logger to ensure secrets never reach log output,
-    even when developers forget to call redact_for_log() manually.
+    even when developers forget to call redact_for_log() manually.  Also
+    redacts dataclass instances in log args (e.g. AccountAuth) via asdict +
+    redact_for_log, and scrubs exception tracebacks.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -107,16 +112,37 @@ class SecretRedactingFilter(logging.Filter):
             record.msg = redact_string(record.msg)
         if record.args:
             record.args = self._scrub_args(record.args)
+
+        # Scrub cached formatted traceback text
+        if record.exc_text:
+            record.exc_text = redact_string(record.exc_text)
+
+        # Scrub exception message so formatters that render it later are safe
+        if record.exc_info and isinstance(record.exc_info, tuple):
+            exc_type, exc_value, exc_tb = record.exc_info
+            if exc_value is not None:
+                try:
+                    sanitized = redact_string(str(exc_value))
+                    new_exc = exc_type(sanitized)
+                    new_exc.__traceback__ = exc_tb
+                    record.exc_info = (exc_type, new_exc, exc_tb)
+                except Exception:
+                    pass  # never break logging
+
         return True
 
     def _scrub_args(self, args: Any) -> Any:
         if isinstance(args, dict):
             return redact_for_log(args)
+        if dataclasses.is_dataclass(args) and not isinstance(args, type):
+            return redact_for_log(dataclasses.asdict(args))
         if isinstance(args, (tuple, list)):
             return tuple(self._scrub_single(a) for a in args)
         return args
 
     def _scrub_single(self, value: Any) -> Any:
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return redact_for_log(dataclasses.asdict(value))
         if isinstance(value, str):
             return redact_string(value)
         if isinstance(value, dict):
