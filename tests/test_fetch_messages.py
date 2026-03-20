@@ -114,6 +114,18 @@ class TestParseGraphqlMessages:
         msgs = _parse_graphql_messages(events, "urn:li:fsd_profile:ABC123")
         assert msgs[0].direction == "in"
 
+    def test_direction_in_when_sender_is_substring_of_profile(self):
+        """Regression: 'john' in 'johnny' must NOT match as 'out'."""
+        events = [_make_message_event("urn:msg:1", sender_urn="urn:li:fsd_profile:johnny")]
+        msgs = _parse_graphql_messages(events, "john")
+        assert msgs[0].direction == "in"
+
+    def test_direction_out_when_profile_is_id_suffix(self):
+        """Profile ID 'ABC123' should match sender 'urn:li:fsd_profile:ABC123' via endswith."""
+        events = [_make_message_event("urn:msg:1", sender_urn="urn:li:fsd_profile:ABC123")]
+        msgs = _parse_graphql_messages(events, "ABC123")
+        assert msgs[0].direction == "out"
+
     def test_direction_in_when_no_profile_id(self):
         events = [_make_message_event("urn:msg:1")]
         msgs = _parse_graphql_messages(events, None)

@@ -282,8 +282,9 @@ def _parse_graphql_messages(
                 sender_name = f"{first} {last}".strip() or sender_urn
 
         direction = "in"
-        if my_profile_id and sender_urn and my_profile_id in sender_urn:
-            direction = "out"
+        if my_profile_id and sender_urn:
+            if sender_urn == my_profile_id or sender_urn.endswith(f":{my_profile_id}"):
+                direction = "out"
 
         # Timestamp.
         created_at = event.get("createdAt") or event.get("deliveredAt")
