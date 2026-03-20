@@ -333,12 +333,23 @@ def test_sync_endpoint_422_for_invalid_limit_per_thread(storage, account_id):
     assert resp.status_code == 422
 
 
-def test_sync_endpoint_501_when_provider_not_implemented(storage, account_id):
-    from unittest.mock import patch
+def test_sync_endpoint_501_when_fetch_messages_not_implemented(storage, account_id):
+    """list_threads is now implemented; 501 comes from fetch_messages."""
+    from unittest.mock import patch, MagicMock
     from fastapi.testclient import TestClient
     from apps.api.main import app
 
-    with patch("apps.api.main.storage", storage):
+    provider = MagicMock()
+    provider.__enter__ = MagicMock(return_value=provider)
+    provider.__exit__ = MagicMock(return_value=False)
+    provider.list_threads.return_value = [
+        LinkedInThread(platform_thread_id="t1", title=None, raw=None),
+    ]
+    provider.fetch_messages.side_effect = NotImplementedError
+
+    with patch("apps.api.main.storage", storage), patch(
+        "apps.api.main.LinkedInProvider", return_value=provider
+    ):
         client = TestClient(app)
         resp = client.post(
             "/sync",
@@ -355,6 +366,8 @@ def test_sync_endpoint_returns_detailed_counts(storage, account_id):
     from libs.providers.linkedin.provider import LinkedInThread, LinkedInMessage
 
     provider = MagicMock()
+    provider.__enter__ = MagicMock(return_value=provider)
+    provider.__exit__ = MagicMock(return_value=False)
     provider.list_threads.return_value = [
         LinkedInThread(platform_thread_id="t1", title=None, raw=None),
     ]

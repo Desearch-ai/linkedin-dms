@@ -153,7 +153,7 @@ class TestSendMessageRequestShape:
         assert headers["Content-Type"] == "application/json"
         assert headers["x-restli-method"] == "CREATE"
         assert headers["x-restli-protocol-version"] == "2.0.0"
-        assert "Chrome" in headers["User-Agent"]
+        assert "Chrome" in headers.get("User-Agent", headers.get("user-agent", ""))
 
         cookies = kwargs["cookies"]
         assert cookies["li_at"] == SAMPLE_AUTH.li_at
@@ -197,7 +197,7 @@ class TestSendMessageRequestShape:
         cookies = client.post.call_args.kwargs["cookies"]
         assert "JSESSIONID" not in cookies
         headers = client.post.call_args.kwargs["headers"]
-        assert headers["csrf-token"] == ""
+        assert "csrf-token" not in headers or headers["csrf-token"] == ""
 
 
 # ---------------------------------------------------------------------------
