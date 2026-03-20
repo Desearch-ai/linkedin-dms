@@ -199,6 +199,22 @@ def test_create_account_returns_id(storage):
     assert aid >= 1
 
 
+def test_update_account_auth_replaces_credentials(storage):
+    """CRUD: update_account_auth replaces stored auth and new value is retrievable."""
+    aid = storage.create_account(label="test", auth=AccountAuth(li_at="old_cookie"), proxy=None)
+    new_auth = AccountAuth(li_at="new_cookie", jsessionid="ajax:new")
+    storage.update_account_auth(aid, new_auth)
+    got = storage.get_account_auth(aid)
+    assert got.li_at == "new_cookie"
+    assert got.jsessionid == "ajax:new"
+
+
+def test_update_account_auth_raises_for_unknown(storage):
+    """Edge case: update_account_auth raises KeyError for missing account."""
+    with pytest.raises(KeyError, match="account 99999 not found"):
+        storage.update_account_auth(99999, AccountAuth(li_at="x"))
+
+
 def test_get_account_auth_raises_for_unknown(storage):
     """Edge case: get_account_auth raises KeyError for missing account."""
     with pytest.raises(KeyError, match="account 99999 not found"):

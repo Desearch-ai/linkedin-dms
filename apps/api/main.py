@@ -50,6 +50,27 @@ class AccountCreateIn(BaseModel):
         return AccountAuth(li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid)
 
 
+class AccountRefreshIn(BaseModel):
+    account_id: int
+    li_at: str | None = Field(None, description="LinkedIn li_at cookie value (required if cookies not provided)")
+    jsessionid: str | None = Field(None, description="Optional JSESSIONID cookie value")
+    cookies: str | None = Field(
+        None,
+        description="Cookie header string, e.g. 'li_at=xxx; JSESSIONID=yyy'. Overrides li_at/jsessionid fields.",
+    )
+
+    @model_validator(mode="after")
+    def require_auth(self) -> AccountRefreshIn:
+        if not self.cookies and not self.li_at:
+            raise ValueError("Provide either 'cookies' string or 'li_at' field")
+        return self
+
+    def to_account_auth(self) -> AccountAuth:
+        if self.cookies:
+            return cookies_to_account_auth(self.cookies)
+        return AccountAuth(li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid)
+
+
 class SendIn(BaseModel):
     account_id: int
     recipient: str = Field(..., min_length=1, description="Recipient id (profile URN or conversation id)")
@@ -83,6 +104,21 @@ def create_account(body: AccountCreateIn):
     account_id = storage.create_account(label=body.label, auth=auth, proxy=proxy)
     logger.info("Account created: %s", redact_for_log({"account_id": account_id, "label": body.label}))
     return {"account_id": account_id}
+
+
+@app.post("/accounts/refresh")
+def refresh_account(body: AccountRefreshIn):
+    """Update session cookies for an existing account without recreating it."""
+    try:
+        auth = body.to_account_auth()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=redact_string(str(exc)))
+    try:
+        storage.update_account_auth(body.account_id, auth)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
+    logger.info("Account refreshed: %s", redact_for_log({"account_id": body.account_id}))
+    return {"ok": True, "account_id": body.account_id}
 
 
 @app.get("/auth/check", response_model=AuthCheckResponse)
@@ -131,6 +167,11 @@ def sync_account(body: SyncIn):
             "messages_skipped_duplicate": result.messages_skipped_duplicate,
             "pages_fetched": result.pages_fetched,
         }
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
+        ) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
@@ -156,6 +197,11 @@ def send_message(body: SendIn):
             idempotency_key=body.idempotency_key,
         )
         return {"ok": True, "platform_message_id": platform_message_id}
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
+        ) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
