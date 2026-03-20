@@ -101,6 +101,19 @@ pip install -e .
 uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8899
 ```
 
+### CLI (no web server)
+
+Use the same SQLite database and provider stack as the API, without uvicorn:
+
+```bash
+python -m apps.cli sync --account-id 1
+python -m apps.cli send --account-id 1 --recipient 'urn:li:fsd_profile:…' --text 'Hello'
+```
+
+Optional: `--db-path /path/to/desearch_linkedin_dms.sqlite` on each subcommand. Sync also accepts `--limit-per-thread`, `--max-pages-per-thread`, and `--exhaust-pagination` (same semantics as `POST /sync`). Send accepts `--idempotency-key`.
+
+If the provider raises `NotImplementedError` (for example sync before thread listing is implemented), the CLI prints a short TODO pointing at `libs/providers/linkedin/provider.py` and exits with a non-zero status.
+
 Open:
 - Health: http://127.0.0.1:8899/health
 - Swagger UI: http://127.0.0.1:8899/docs
