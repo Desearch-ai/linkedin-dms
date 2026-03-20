@@ -519,6 +519,27 @@ class TestFetchMessages:
         assert "urn:msg:unique" in ids
         assert len(msgs) == 2
 
+    def test_cursor_set_when_dedup_reduces_below_limit(self, provider):
+        """Regression: cursor must use pre-dedup element count, not post-dedup.
+
+        If server returns limit=2 elements but dedup reduces to 1 message,
+        next_cursor must still be set because the server page was full.
+        """
+        dup1 = _make_message_event("urn:msg:dup", text="first", created_at=1700000001000)
+        dup2 = _make_message_event("urn:msg:dup", text="second", created_at=1700000002000)
+        data = _graphql_messages_response([dup1, dup2])
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        mock_client.get.return_value = _mock_resp(data)
+        with _patch_client(mock_client):
+            msgs, cursor = provider.fetch_messages(
+                platform_thread_id="urn:li:conv:1",
+                cursor=None,
+                limit=2,
+            )
+        assert len(msgs) == 1  # dedup reduced to 1
+        assert cursor is not None  # but cursor must still be set (server had full page)
+
     def test_handles_data_field_as_list(self, provider):
         """Regression: data["data"] can be [] instead of dict — should not crash."""
         r = MagicMock()

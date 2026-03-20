@@ -52,6 +52,10 @@ _RETRY_BASE_DELAY_S = 2.0
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _PLAYWRIGHT_NAV_RETRIES = 2
 
+# NOTE: These queryId hashes are extracted from LinkedIn's frontend JS bundle.
+# LinkedIn may rotate them without notice. If requests start returning 400/404,
+# update by inspecting XHR calls on linkedin.com/messaging/ in browser DevTools
+# and extracting the new queryId values from the graphql request URLs.
 _CONVERSATIONS_QUERY_ID = "messengerConversations.0d5e6781bbee71c3e51c8843c6519f48"
 _MESSAGES_QUERY_ID = "messengerMessages.21eabeb3ee872254060ef21b793ea7d0"
 
@@ -661,7 +665,7 @@ class LinkedInProvider:
         messages = _parse_graphql_messages(elements, my_profile_id)
 
         next_cursor: Optional[str] = None
-        if len(messages) >= limit and messages:
+        if len(elements) >= limit and messages:
             oldest = messages[0]
             if oldest.raw and isinstance(oldest.raw, dict):
                 created_at = oldest.raw.get("createdAt")

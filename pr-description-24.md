@@ -56,16 +56,18 @@ list_threads() ───────────────────→ Grap
 - **`pyproject.toml`** — Add `[browser]` optional extra for Playwright
 - **`tests/test_list_threads.py`** — 57 tests for list_threads (new)
 - **`tests/test_fetch_messages.py`** — 44 tests for fetch_messages (new)
-- **`tests/test_sync_send.py`** — Update 1 test (was testing NotImplementedError stub; now tests missing-JSESSIONID error)
+- **`tests/test_sync_send.py`** — Update 1 test (missing JSESSIONID now returns 422 instead of 500)
+- **`apps/api/main.py`** — `/sync` endpoint now catches `ValueError`/`RuntimeError` → 422
+- **`libs/core/job_runner.py`** — Add `time.sleep(1.5)` rate-limit between `fetch_messages` pages
 
-## Testing — 263 tests, 0 failures
+## Testing — 268+ tests, 0 failures
 
 ```
 $ python -m pytest tests/ -v
-263 passed in 0.85s
+268 passed
 ```
 
-All Playwright usage is **mocked** — no real browser needed for tests. All upstream tests pass unmodified (except the 501-stub test which now correctly tests the implemented behavior).
+All Playwright usage is **mocked** — no real browser needed for tests. All upstream tests pass (one test updated: missing JSESSIONID now correctly returns 422 instead of 500).
 
 ## Edge cases
 
@@ -83,13 +85,14 @@ All Playwright usage is **mocked** — no real browser needed for tests. All ups
 | syncToken unchanged | Pagination stops |
 | Max pages cap (50) | Prevents infinite loops |
 | Proxy configured | Forwarded to both Playwright and httpx |
+| Dedup reduces page below limit | Cursor still set (uses pre-dedup element count) |
 | `Retry-After` on 429 | Honoured |
 
 ## Setup
 
 ```bash
 pip install -e ".[test]"
-python -m pytest tests/ -v    # 263 passed
+python -m pytest tests/ -v    # 268+ passed
 
 # Optional — only needed if Cloudflare blocks basic cookies:
 pip install -e ".[browser]"
