@@ -177,6 +177,11 @@ def sync_account(body: SyncIn):
             status_code=501,
             detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
         ) from None
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(
+            status_code=422,
+            detail=redact_string(str(e)),
+        ) from None
 
 
 @app.post("/send")

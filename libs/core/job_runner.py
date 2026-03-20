@@ -4,10 +4,13 @@ Reusable by the API and future CLI. Aligned to provider and storage stubs.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
+
+_DELAY_BETWEEN_PAGES_S = 1.5
 
 
 def _normalize_sent_at(dt: datetime) -> datetime:
@@ -85,6 +88,7 @@ def run_sync(
             if next_cursor is None:
                 break
             cursor = next_cursor
+            time.sleep(_DELAY_BETWEEN_PAGES_S)
         synced_threads += 1
     return SyncResult(
         synced_threads=synced_threads,

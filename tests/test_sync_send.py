@@ -333,19 +333,20 @@ def test_sync_endpoint_422_for_invalid_limit_per_thread(storage, account_id):
     assert resp.status_code == 422
 
 
-def test_sync_endpoint_error_when_jsessionid_missing(storage, account_id):
+def test_sync_endpoint_422_when_jsessionid_missing(storage, account_id):
     from unittest.mock import patch
     from fastapi.testclient import TestClient
     from apps.api.main import app
 
     with patch("apps.api.main.storage", storage):
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(app)
         resp = client.post(
             "/sync",
             json={"account_id": account_id, "limit_per_thread": 50},
         )
-    # Account has jsessionid=None → list_threads raises ValueError → 500
-    assert resp.status_code == 500
+    # Account has jsessionid=None → list_threads raises ValueError → 422
+    assert resp.status_code == 422
+    assert "jsessionid" in resp.json()["detail"].lower()
 
 
 def test_sync_endpoint_returns_detailed_counts(storage, account_id):
