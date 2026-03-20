@@ -729,6 +729,22 @@ class TestJsonDecodeSafety:
 # Skips non-dict elements
 # ---------------------------------------------------------------------------
 
+class TestDataFieldAsList:
+    def test_list_threads_handles_data_field_as_list(self, provider):
+        """Regression: data["data"] can be [] instead of dict — should not crash."""
+        r = MagicMock()
+        r.status_code = 200
+        r.content = b'{"data":[]}'
+        r.raise_for_status = MagicMock()
+        r.json.return_value = {"data": []}
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        mock_client.get.return_value = r
+        with _patch_client(mock_client):
+            threads = provider.list_threads()
+        assert threads == []
+
+
 class TestSkipNonDictElements:
     def test_list_threads_skips_non_dict_in_elements(self, provider):
         elems = ["string-element", 42, None, _make_conversation("urn:conv:ok")]

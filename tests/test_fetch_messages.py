@@ -175,6 +175,26 @@ class TestParseGraphqlMessages:
         msgs = _parse_graphql_messages([event], None)
         assert msgs[0].text is None
 
+    def test_attributed_body_null_does_not_crash(self):
+        """Regression: attributedBody can be explicitly null (not missing)."""
+        event = {
+            "entityUrn": "urn:msg:1",
+            "createdAt": 1700000000000,
+            "eventContent": {"attributedBody": None, "text": "fallback"},
+        }
+        msgs = _parse_graphql_messages([event], None)
+        assert msgs[0].text == "fallback"
+
+    def test_attributed_body_null_no_fallback(self):
+        """attributedBody is null and no text fallback → None."""
+        event = {
+            "entityUrn": "urn:msg:1",
+            "createdAt": 1700000000000,
+            "eventContent": {"attributedBody": None},
+        }
+        msgs = _parse_graphql_messages([event], None)
+        assert msgs[0].text is None
+
     def test_empty_events_list(self):
         assert _parse_graphql_messages([], None) == []
 
@@ -498,6 +518,24 @@ class TestFetchMessages:
         assert ids.count("urn:msg:dup") == 1
         assert "urn:msg:unique" in ids
         assert len(msgs) == 2
+
+    def test_handles_data_field_as_list(self, provider):
+        """Regression: data["data"] can be [] instead of dict — should not crash."""
+        r = MagicMock()
+        r.status_code = 200
+        r.content = b'{"data":[]}'
+        r.raise_for_status = MagicMock()
+        r.json.return_value = {"data": []}
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        mock_client.get.return_value = r
+        with _patch_client(mock_client):
+            msgs, cursor = provider.fetch_messages(
+                platform_thread_id="urn:li:conv:1",
+                cursor=None,
+            )
+        assert msgs == []
+        assert cursor is None
 
     def test_handles_html_error_page(self, provider):
         """HTML response (e.g. login redirect) doesn't crash."""

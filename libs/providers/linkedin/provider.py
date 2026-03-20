@@ -254,8 +254,9 @@ def _parse_graphql_messages(
         # Extract text body.
         body = event.get("eventContent") or event.get("body") or {}
         if isinstance(body, dict):
+            attr_body = body.get("attributedBody")
             text = (
-                body.get("attributedBody", {}).get("text")
+                (attr_body.get("text") if isinstance(attr_body, dict) else None)
                 or body.get("text")
                 or body.get("body")
             )
@@ -402,10 +403,7 @@ class LinkedInProvider:
         }
 
     def _build_basic_cookies(self) -> dict[str, str]:
-        cookies: dict[str, str] = {"li_at": self.auth.li_at}
-        if self.auth.jsessionid:
-            cookies["JSESSIONID"] = self.auth.jsessionid
-        return cookies
+        return self._get_cookies()
 
     def _get_browser_cookies(self) -> dict[str, str]:
         if self._browser_cookies is not None:
@@ -543,10 +541,9 @@ class LinkedInProvider:
             if not isinstance(data, dict):
                 data = {}
 
-            conv_data = (
-                data.get("data", {})
-                .get("messengerConversationsBySyncToken", {})
-            )
+            inner = data.get("data")
+            inner = inner if isinstance(inner, dict) else {}
+            conv_data = inner.get("messengerConversationsBySyncToken", {})
             if not isinstance(conv_data, dict):
                 conv_data = {}
 
@@ -651,10 +648,9 @@ class LinkedInProvider:
         if not isinstance(data, dict):
             data = {}
 
-        msg_data = (
-            data.get("data", {})
-            .get("messengerMessagesBySyncToken", data.get("data", {}).get("messengerMessages", {}))
-        )
+        inner = data.get("data")
+        inner = inner if isinstance(inner, dict) else {}
+        msg_data = inner.get("messengerMessagesBySyncToken") or inner.get("messengerMessages", {})
         if not isinstance(msg_data, dict):
             msg_data = {}
 
