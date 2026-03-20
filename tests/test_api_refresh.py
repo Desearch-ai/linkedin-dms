@@ -1,8 +1,9 @@
-"""Tests for the POST /accounts/refresh endpoint — cookie refresh without account recreation."""
+"""Tests for the POST /accounts/refresh endpoint and 401 session-expired handling."""
 
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -139,3 +140,55 @@ class TestRefreshValidation:
             json={"account_id": aid, "cookies": "JSESSIONID=ajax:tok123"},
         )
         assert resp.status_code == 422
+
+
+class TestSessionExpired401:
+    """Verify /send and /sync return 401 with refresh hint when provider raises PermissionError."""
+
+    def test_send_returns_401_on_expired_session(self, client):
+        aid = _create_account(client)
+        with patch("apps.api.main.run_send", side_effect=PermissionError("LinkedIn session expired (HTTP 401)")):
+            resp = client.post(
+                "/send",
+                json={"account_id": aid, "recipient": "urn:li:member:123", "text": "hello"},
+            )
+        assert resp.status_code == 401
+        assert "re-authenticate via POST /accounts/refresh" in resp.json()["detail"]
+
+    def test_sync_returns_401_on_expired_session(self, client):
+        aid = _create_account(client)
+        with patch("apps.api.main.run_sync", side_effect=PermissionError("LinkedIn session expired (HTTP 401)")):
+            resp = client.post(
+                "/sync",
+                json={"account_id": aid},
+            )
+        assert resp.status_code == 401
+        assert "re-authenticate via POST /accounts/refresh" in resp.json()["detail"]
+
+    def test_send_401_then_refresh_then_send_succeeds(self, client):
+        """Full flow: send fails with 401, client refreshes cookies, send succeeds."""
+        aid = _create_account(client)
+
+        # First send fails with expired session
+        with patch("apps.api.main.run_send", side_effect=PermissionError("HTTP 401")):
+            resp = client.post(
+                "/send",
+                json={"account_id": aid, "recipient": "urn:li:member:123", "text": "hello"},
+            )
+        assert resp.status_code == 401
+
+        # Client refreshes cookies
+        resp = client.post(
+            "/accounts/refresh",
+            json={"account_id": aid, "li_at": "AQEDFreshNewCookie123"},
+        )
+        assert resp.status_code == 200
+
+        # Second send succeeds with new cookies
+        with patch("apps.api.main.run_send", return_value="msg-id-123"):
+            resp = client.post(
+                "/send",
+                json={"account_id": aid, "recipient": "urn:li:member:123", "text": "hello"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True

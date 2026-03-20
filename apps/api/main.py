@@ -167,6 +167,11 @@ def sync_account(body: SyncIn):
             "messages_skipped_duplicate": result.messages_skipped_duplicate,
             "pages_fetched": result.pages_fetched,
         }
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
+        ) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
@@ -192,6 +197,11 @@ def send_message(body: SendIn):
             idempotency_key=body.idempotency_key,
         )
         return {"ok": True, "platform_message_id": platform_message_id}
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
+        ) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
