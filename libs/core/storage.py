@@ -172,6 +172,25 @@ class Storage:
         self._conn.commit()
         return int(cur.lastrowid)
 
+    def update_account_auth(
+        self,
+        account_id: int,
+        auth: AccountAuth,
+    ) -> None:
+        """Replace the auth credentials for an existing account.
+
+        Raises KeyError if the account does not exist.
+        """
+        row = self._conn.execute("SELECT id FROM accounts WHERE id=?", (account_id,)).fetchone()
+        if not row:
+            raise KeyError(f"account {account_id} not found")
+        auth_json = encrypt_if_configured(json.dumps(asdict(auth)))
+        self._conn.execute(
+            "UPDATE accounts SET auth_json=? WHERE id=?",
+            (auth_json, account_id),
+        )
+        self._conn.commit()
+
     def get_account_auth(self, account_id: int) -> AccountAuth:
         row = self._conn.execute("SELECT auth_json FROM accounts WHERE id=?", (account_id,)).fetchone()
         if not row:
