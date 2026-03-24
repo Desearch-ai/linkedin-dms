@@ -146,7 +146,7 @@ def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:
             limit_per_thread=args.limit_per_thread,
             max_pages_per_thread=max_pages,
         )
-    except NotImplementedError:
+    except (NotImplementedError, ValueError):
         _stderr(_PROVIDER_TODO)
         return 1
     except Exception:
@@ -196,7 +196,7 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
             text=text,
             idempotency_key=idem,
         )
-    except NotImplementedError:
+    except (NotImplementedError, ValueError):
         _stderr(_PROVIDER_TODO)
         return 1
     except (PermissionError, ConnectionError, RuntimeError) as exc:
