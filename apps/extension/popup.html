@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=360" />
+  <title>LinkedIn DMs Bridge</title>
+  <link rel="stylesheet" href="pico.min.css" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <hgroup>
+        <h1>LinkedIn DMs Bridge</h1>
+        <p id="status-badge">Disconnected</p>
+      </hgroup>
+    </header>
+
+    <section>
+      <h2>Service URL</h2>
+      <form id="form-url" role="group">
+        <input id="service-url" type="url" placeholder="http://localhost:8000" />
+        <button type="submit">Save</button>
+      </form>
+      <small id="health-status"></small>
+    </section>
+
+    <section>
+      <h2>Account</h2>
+      <table>
+        <tbody>
+          <tr><td>ID</td><td id="account-id">—</td></tr>
+          <tr><td>Cookie</td><td id="cookie-status">—</td></tr>
+          <tr><td>Headers</td><td id="headers-status">—</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Sync</h2>
+      <small id="last-sync">Never synced</small>
+      <button id="btn-sync" disabled>Sync Now</button>
+      <small id="sync-result"></small>
+    </section>
+
+    <footer>
+      <button id="btn-disconnect" class="outline secondary">Disconnect</button>
+    </footer>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+/* Extension popup overrides on top of Pico CSS */
+
+:root {
+  --pico-font-size: 13px;
+  --pico-border-radius: 6px;
+}
+
+body {
+  width: 340px;
+  padding: 0;
+  margin: 0;
+}
+
+main {
+  padding: 16px;
+}
+
+header {
+  margin-bottom: 8px;
+}
+
+h1 {
+  font-size: 15px;
+  margin-bottom: 0;
+}
+
+h2 {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+hgroup > p {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 0;
+}
+
+section {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+
+/* Status colors */
+.status-connected    { color: var(--pico-ins-color, #2ecc71); }
+.status-expired      { color: var(--pico-del-color, #e74c3c); }
+.status-error        { color: #e67e22; }
+.status-disconnected { color: var(--pico-muted-color); }
+
+/* Compact table */
+table {
+  margin-bottom: 0;
+}
+
+td {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+td:first-child {
+  width: 70px;
+  color: var(--pico-muted-color);
+  font-weight: 500;
+}
+
+/* Buttons */
+#btn-sync {
+  width: 100%;
+  margin-top: 8px;
+}
+
+#btn-disconnect {
+  width: 100%;
+  font-size: 11px;
+  padding: 6px;
+}
+
+/* Form group (service URL row) */
+[role="group"] {
+  margin-bottom: 4px;
+}
+
+small {
+  display: block;
+}
+
+footer {
+  margin-top: 8px;
+}
