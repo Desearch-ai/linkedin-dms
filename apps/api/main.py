@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
-from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.job_runner import run_send, run_sync, SyncConfig, SyncResult
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
@@ -87,6 +87,12 @@ class SyncIn(BaseModel):
         le=100,
         description="Max pages per thread (1=MVP); omit or null to exhaust cursor",
     )
+    delay_between_threads_s: float = Field(
+        2.0, ge=0, le=60, description="Seconds to pause between threads",
+    )
+    delay_between_pages_s: float = Field(
+        1.5, ge=0, le=60, description="Seconds to pause between fetch_messages pages",
+    )
 
 
 @app.get("/health")
@@ -151,7 +157,11 @@ def sync_account(body: SyncIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
+    sync_config = SyncConfig(
+        delay_between_threads_s=body.delay_between_threads_s,
+        delay_between_pages_s=body.delay_between_pages_s,
+    )
     try:
         result: SyncResult = run_sync(
             account_id=body.account_id,
@@ -159,6 +169,7 @@ def sync_account(body: SyncIn):
             provider=provider,
             limit_per_thread=body.limit_per_thread,
             max_pages_per_thread=body.max_pages_per_thread,
+            sync_config=sync_config,
         )
         return {
             "ok": True,
@@ -166,6 +177,7 @@ def sync_account(body: SyncIn):
             "messages_inserted": result.messages_inserted,
             "messages_skipped_duplicate": result.messages_skipped_duplicate,
             "pages_fetched": result.pages_fetched,
+            "rate_limited": result.rate_limited,
         }
     except PermissionError as exc:
         raise HTTPException(
@@ -191,7 +203,7 @@ def send_message(body: SendIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
     try:
         platform_message_id = run_send(
             account_id=body.account_id,

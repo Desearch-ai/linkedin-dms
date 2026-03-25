@@ -4,13 +4,14 @@ Reusable by the API and future CLI. Aligned to provider and storage stubs.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
 
-_DELAY_BETWEEN_PAGES_S = 1.5
+logger = logging.getLogger(__name__)
 
 
 def _normalize_sent_at(dt: datetime) -> datetime:
@@ -19,12 +20,22 @@ def _normalize_sent_at(dt: datetime) -> datetime:
     return dt
 
 
+@dataclass
+class SyncConfig:
+    """Configurable delays for safe sync under LinkedIn's anti-bot limits."""
+    delay_between_threads_s: float = 2.0
+    delay_between_pages_s: float = 1.5
+    # Reserved for future multi-account batch sync (not yet wired).
+    delay_between_accounts_s: float = 5.0
+
+
 @dataclass(frozen=True)
 class SyncResult:
     synced_threads: int
     messages_inserted: int
     messages_skipped_duplicate: int
     pages_fetched: int
+    rate_limited: bool
 
 
 def run_sync(
@@ -33,6 +44,7 @@ def run_sync(
     provider: LinkedInProvider,
     limit_per_thread: int = 50,
     max_pages_per_thread: int | None = 1,
+    sync_config: SyncConfig | None = None,
 ) -> SyncResult:
     """Sync threads and messages from provider into storage.
 
@@ -42,16 +54,25 @@ def run_sync(
         provider: LinkedIn provider (list_threads, fetch_messages).
         limit_per_thread: Max messages per fetch_messages call.
         max_pages_per_thread: Max pages per thread (1 = MVP one page). None = exhaust cursor.
+        sync_config: Rate-limit delay configuration. Uses defaults if not provided.
 
     Returns:
         SyncResult with counts. Duplicates are skipped and counted separately.
     """
+    cfg = sync_config or SyncConfig()
     threads = provider.list_threads()
     synced_threads = 0
     messages_inserted = 0
     messages_skipped = 0
     pages_fetched = 0
-    for t in threads:
+    for i, t in enumerate(threads):
+        if i > 0:
+            logger.debug(
+                "sync: sleeping %.1fs between threads (account_id=%d)",
+                cfg.delay_between_threads_s,
+                account_id,
+            )
+            time.sleep(cfg.delay_between_threads_s)
         thread_id = storage.upsert_thread(
             account_id=account_id,
             platform_thread_id=t.platform_thread_id,
@@ -88,13 +109,19 @@ def run_sync(
             if next_cursor is None:
                 break
             cursor = next_cursor
-            time.sleep(_DELAY_BETWEEN_PAGES_S)
+            time.sleep(cfg.delay_between_pages_s)
         synced_threads += 1
+    if provider.rate_limit_encountered:
+        logger.warning(
+            "sync: rate-limit encountered during sync (account_id=%d)",
+            account_id,
+        )
     return SyncResult(
         synced_threads=synced_threads,
         messages_inserted=messages_inserted,
         messages_skipped_duplicate=messages_skipped,
         pages_fetched=pages_fetched,
+        rate_limited=provider.rate_limit_encountered,
     )
 
 

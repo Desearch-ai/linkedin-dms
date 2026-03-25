@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from apps.cli import __main__ as cli_main
-from libs.core.job_runner import SyncResult
+from libs.core.job_runner import SyncConfig, SyncResult
 from libs.core.models import AccountAuth
 from libs.core.storage import Storage
 
@@ -55,6 +55,7 @@ def test_cli_sync_stdout_json_on_success_with_mocked_empty_threads(
     with patch.object(cli_main, "LinkedInProvider") as m_cls:
         inst = MagicMock()
         inst.list_threads.return_value = []
+        inst.rate_limit_encountered = False
         m_cls.return_value = inst
         rc = cli_main.main(
             ["sync", "--account-id", str(account_id), "--db-path", cli_db_path]
@@ -67,6 +68,7 @@ def test_cli_sync_stdout_json_on_success_with_mocked_empty_threads(
         "messages_inserted": 0,
         "messages_skipped_duplicate": 0,
         "pages_fetched": 0,
+        "rate_limited": False,
     }
     inst.list_threads.assert_called_once_with()
 
@@ -134,7 +136,7 @@ def test_cli_sync_default_max_pages_per_thread_is_one(
         cli_main, "LinkedInProvider"
     ) as m_cls:
         m_cls.return_value = MagicMock()
-        m_run.return_value = SyncResult(0, 0, 0, 0)
+        m_run.return_value = SyncResult(0, 0, 0, 0, False)
         rc = cli_main.main(
             ["sync", "--account-id", str(account_id), "--db-path", cli_db_path]
         )
@@ -150,7 +152,7 @@ def test_cli_sync_exhaust_pagination_passes_none_max_pages(
         cli_main, "LinkedInProvider"
     ) as m_cls:
         m_cls.return_value = MagicMock()
-        m_run.return_value = SyncResult(0, 0, 0, 0)
+        m_run.return_value = SyncResult(0, 0, 0, 0, False)
         rc = cli_main.main(
             [
                 "sync",

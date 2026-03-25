@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from libs.core.job_runner import SyncResult, run_send, run_sync
+from libs.core.job_runner import SyncConfig, SyncResult, run_send, run_sync
 from libs.core.models import AccountAuth
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInMessage, LinkedInProvider, LinkedInThread
@@ -31,6 +31,13 @@ def account_id(storage):
     return storage.create_account(label="test", auth=auth, proxy=None)
 
 
+def _mock_provider(**kwargs):
+    """Create a MagicMock provider with rate_limit_encountered attribute."""
+    provider = MagicMock(spec=LinkedInProvider, **kwargs)
+    provider.rate_limit_encountered = False
+    return provider
+
+
 def test_run_sync_upserts_threads_and_messages(storage, account_id):
     thread = LinkedInThread(platform_thread_id="urn:li:conv:1", title="Alice", raw=None)
     msg = LinkedInMessage(
@@ -41,7 +48,7 @@ def test_run_sync_upserts_threads_and_messages(storage, account_id):
         sent_at=datetime.now(timezone.utc),
         raw=None,
     )
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = [thread]
     provider.fetch_messages.return_value = ([msg], None)
 
@@ -56,6 +63,7 @@ def test_run_sync_upserts_threads_and_messages(storage, account_id):
     assert result.messages_inserted == 1
     assert result.messages_skipped_duplicate == 0
     assert result.pages_fetched == 1
+    assert result.rate_limited is False
     provider.list_threads.assert_called_once()
     provider.fetch_messages.assert_called_once_with(
         platform_thread_id="urn:li:conv:1",
@@ -69,7 +77,7 @@ def test_run_sync_upserts_threads_and_messages(storage, account_id):
 
 
 def test_run_sync_empty_threads_returns_zero_counts(storage, account_id):
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = []
 
     result = run_sync(
@@ -105,7 +113,7 @@ def test_run_sync_multiple_threads_and_messages(storage, account_id):
         sent_at=datetime.now(timezone.utc),
         raw=None,
     )
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = [t1, t2]
     provider.fetch_messages.side_effect = [([msg1], None), ([msg2], None)]
 
@@ -131,7 +139,7 @@ def test_run_sync_duplicate_messages_counted_as_skipped(storage, account_id):
         sent_at=datetime.now(timezone.utc),
         raw=None,
     )
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = [thread]
     provider.fetch_messages.return_value = ([msg], None)
 
@@ -156,7 +164,7 @@ def test_run_sync_duplicate_messages_counted_as_skipped(storage, account_id):
 
 def test_run_sync_uses_stored_cursor(storage, account_id):
     thread = LinkedInThread(platform_thread_id="t1", title=None, raw=None)
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = [thread]
     provider.fetch_messages.return_value = ([], None)
     thread_id = storage.upsert_thread(
@@ -195,7 +203,7 @@ def test_run_sync_exhausts_cursor_when_max_pages_none(storage, account_id):
         sent_at=datetime.now(timezone.utc),
         raw=None,
     )
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = [thread]
     provider.fetch_messages.side_effect = [
         ([msg1], "cursor2"),
@@ -216,7 +224,7 @@ def test_run_sync_exhausts_cursor_when_max_pages_none(storage, account_id):
 
 def test_run_sync_respects_max_pages_per_thread(storage, account_id):
     thread = LinkedInThread(platform_thread_id="t1", title=None, raw=None)
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = [thread]
     provider.fetch_messages.return_value = ([], "next")
 
@@ -242,7 +250,7 @@ def test_run_sync_normalizes_naive_sent_at(storage, account_id):
         sent_at=naive_dt,
         raw=None,
     )
-    provider = MagicMock(spec=LinkedInProvider)
+    provider = _mock_provider()
     provider.list_threads.return_value = [thread]
     provider.fetch_messages.return_value = ([msg], None)
 
@@ -258,6 +266,81 @@ def test_run_sync_normalizes_naive_sent_at(storage, account_id):
     ).fetchall()
     assert len(rows) == 1
     assert "Z" in rows[0]["sent_at"] or "+00:00" in rows[0]["sent_at"]
+
+
+def test_run_sync_rate_limited_flag_propagated(storage, account_id):
+    thread = LinkedInThread(platform_thread_id="t1", title=None, raw=None)
+    provider = _mock_provider()
+    provider.list_threads.return_value = [thread]
+    provider.fetch_messages.return_value = ([], None)
+    provider.rate_limit_encountered = True
+
+    result = run_sync(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        limit_per_thread=50,
+    )
+    assert result.rate_limited is True
+
+
+def test_run_sync_respects_sync_config_delays(storage, account_id):
+    """SyncConfig delays are forwarded to time.sleep between threads and pages."""
+    from unittest.mock import patch, call
+
+    t1 = LinkedInThread(platform_thread_id="c1", title=None, raw=None)
+    t2 = LinkedInThread(platform_thread_id="c2", title=None, raw=None)
+    msg = LinkedInMessage(
+        platform_message_id="m1",
+        direction="in",
+        sender=None,
+        text="x",
+        sent_at=datetime.now(timezone.utc),
+        raw=None,
+    )
+    provider = _mock_provider()
+    provider.list_threads.return_value = [t1, t2]
+    provider.fetch_messages.side_effect = [
+        ([msg], "next"),
+        ([], None),
+        ([], None),
+    ]
+    cfg = SyncConfig(delay_between_threads_s=3.5, delay_between_pages_s=1.0)
+
+    with patch("libs.core.job_runner.time.sleep") as mock_sleep:
+        result = run_sync(
+            account_id=account_id,
+            storage=storage,
+            provider=provider,
+            limit_per_thread=50,
+            max_pages_per_thread=None,
+            sync_config=cfg,
+        )
+
+    assert result.synced_threads == 2
+    sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+    assert 3.5 in sleep_calls
+    assert 1.0 in sleep_calls
+
+
+def test_run_sync_logs_rate_limit_warning(storage, account_id, caplog):
+    """When provider signals rate-limit, run_sync logs a warning with account_id."""
+    import logging
+
+    provider = _mock_provider()
+    provider.list_threads.return_value = []
+    provider.rate_limit_encountered = True
+
+    with caplog.at_level(logging.WARNING, logger="libs.core.job_runner"):
+        result = run_sync(
+            account_id=account_id,
+            storage=storage,
+            provider=provider,
+            limit_per_thread=50,
+        )
+    assert result.rate_limited is True
+    assert any("rate-limit" in r.message.lower() for r in caplog.records)
+    assert any(str(account_id) in r.message for r in caplog.records)
 
 
 def test_run_send_returns_platform_message_id(storage, account_id):
@@ -375,6 +458,7 @@ def test_sync_endpoint_returns_detailed_counts(storage, account_id):
     assert "messages_inserted" in data
     assert "messages_skipped_duplicate" in data
     assert "pages_fetched" in data
+    assert "rate_limited" in data
 
 
 def test_send_endpoint_404_for_unknown_account(db_path):
