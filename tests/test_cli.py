@@ -188,11 +188,14 @@ def test_cli_send_stdout_json_on_success(
         )
     assert rc == 0
     out = json.loads(capsys.readouterr().out.strip())
-    assert out == {"ok": True, "platform_message_id": "urn:li:msg:1"}
+    assert out["ok"] is True
+    assert out["platform_message_id"] == "urn:li:msg:1"
+    assert out["status"] == "sent"
+    assert out["was_duplicate"] is False
+    assert "send_id" in out
     inst.send_message.assert_called_once_with(
         recipient="urn:li:fsd_profile:ACoAAA",
         text="hello",
-        idempotency_key=None,
     )
 
 
@@ -220,7 +223,6 @@ def test_cli_send_passes_idempotency_key(cli_db_path: str, account_id: int) -> N
     inst.send_message.assert_called_once_with(
         recipient="r1",
         text="t",
-        idempotency_key="k1",
     )
 
 

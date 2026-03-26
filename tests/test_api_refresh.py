@@ -185,7 +185,15 @@ class TestSessionExpired401:
         assert resp.status_code == 200
 
         # Second send succeeds with new cookies
-        with patch("apps.api.main.run_send", return_value="msg-id-123"):
+        from libs.core.job_runner import SendResult
+
+        mock_result = SendResult(
+            send_id=1,
+            platform_message_id="msg-id-123",
+            status="sent",
+            was_duplicate=False,
+        )
+        with patch("apps.api.main.run_send", return_value=mock_result):
             resp = client.post(
                 "/send",
                 json={"account_id": aid, "recipient": "urn:li:member:123", "text": "hello"},

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from libs.core.job_runner import SyncResult, run_send, run_sync
+from libs.core.job_runner import SendResult, SyncResult, run_send, run_sync
 from libs.core.models import AccountAuth
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInMessage, LinkedInProvider, LinkedInThread
@@ -260,11 +260,11 @@ def test_run_sync_normalizes_naive_sent_at(storage, account_id):
     assert "Z" in rows[0]["sent_at"] or "+00:00" in rows[0]["sent_at"]
 
 
-def test_run_send_returns_platform_message_id(storage, account_id):
+def test_run_send_returns_send_result(storage, account_id):
     provider = MagicMock(spec=LinkedInProvider)
     provider.send_message.return_value = "plat-msg-123"
 
-    out = run_send(
+    result = run_send(
         account_id=account_id,
         storage=storage,
         provider=provider,
@@ -272,11 +272,14 @@ def test_run_send_returns_platform_message_id(storage, account_id):
         text="Hello",
         idempotency_key="key-1",
     )
-    assert out == "plat-msg-123"
+    assert isinstance(result, SendResult)
+    assert result.platform_message_id == "plat-msg-123"
+    assert result.status == "sent"
+    assert result.was_duplicate is False
+    assert result.send_id >= 1
     provider.send_message.assert_called_once_with(
         recipient="bob",
         text="Hello",
-        idempotency_key="key-1",
     )
 
 
@@ -284,7 +287,7 @@ def test_run_send_with_none_idempotency_key(storage, account_id):
     provider = MagicMock(spec=LinkedInProvider)
     provider.send_message.return_value = "id-1"
 
-    out = run_send(
+    result = run_send(
         account_id=account_id,
         storage=storage,
         provider=provider,
@@ -292,12 +295,219 @@ def test_run_send_with_none_idempotency_key(storage, account_id):
         text="Hi",
         idempotency_key=None,
     )
-    assert out == "id-1"
+    assert result.platform_message_id == "id-1"
+    assert result.status == "sent"
+    assert result.was_duplicate is False
     provider.send_message.assert_called_once_with(
         recipient="alice",
         text="Hi",
+    )
+
+
+def test_run_send_none_key_twice_creates_independent_records(storage, account_id):
+    """Two calls with idempotency_key=None must both hit the provider and create separate records."""
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.side_effect = ["msg-1", "msg-2"]
+
+    r1 = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
         idempotency_key=None,
     )
+    r2 = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key=None,
+    )
+    assert r1.platform_message_id == "msg-1"
+    assert r2.platform_message_id == "msg-2"
+    assert r1.was_duplicate is False
+    assert r2.was_duplicate is False
+    assert r1.send_id != r2.send_id
+    assert provider.send_message.call_count == 2
+
+
+def test_run_send_idempotency_prevents_duplicate(storage, account_id):
+    """Same idempotency key returns cached result without calling provider again."""
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.return_value = "plat-msg-456"
+
+    r1 = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key="dedup-1",
+    )
+    r2 = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key="dedup-1",
+    )
+    assert r1.status == "sent"
+    assert r1.was_duplicate is False
+    assert r2.status == "sent"
+    assert r2.was_duplicate is True
+    assert r2.platform_message_id == "plat-msg-456"
+    assert provider.send_message.call_count == 1
+
+
+def test_run_send_different_keys_send_separately(storage, account_id):
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.side_effect = ["msg-a", "msg-b"]
+
+    r1 = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key="key-a",
+    )
+    r2 = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key="key-b",
+    )
+    assert r1.platform_message_id == "msg-a"
+    assert r2.platform_message_id == "msg-b"
+    assert provider.send_message.call_count == 2
+
+
+def test_run_send_retries_failed_with_same_key(storage, account_id):
+    """A failed send can be retried with the same idempotency key."""
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.side_effect = [
+        ConnectionError("network down"),
+        "plat-msg-retry-ok",
+    ]
+
+    with pytest.raises(ConnectionError):
+        run_send(
+            account_id=account_id,
+            storage=storage,
+            provider=provider,
+            recipient="bob",
+            text="Hello",
+            idempotency_key="retry-key",
+        )
+
+    result = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key="retry-key",
+    )
+    assert result.status == "sent"
+    assert result.platform_message_id == "plat-msg-retry-ok"
+    assert result.was_duplicate is False
+    assert provider.send_message.call_count == 2
+
+
+def test_run_send_records_outbound_send(storage, account_id):
+    """Outbound send is persisted and queryable via storage."""
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.return_value = "msg-99"
+
+    result = run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="alice",
+        text="Hey",
+        idempotency_key="track-1",
+    )
+    record = storage.get_outbound_send(send_id=result.send_id)
+    assert record is not None
+    assert record["status"] == "sent"
+    assert record["platform_message_id"] == "msg-99"
+    assert record["recipient"] == "alice"
+    assert record["attempts"] == 1
+
+
+def test_run_send_failure_records_error(storage, account_id):
+    """Failed sends are recorded with error details."""
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.side_effect = PermissionError("HTTP 401")
+
+    with pytest.raises(PermissionError):
+        run_send(
+            account_id=account_id,
+            storage=storage,
+            provider=provider,
+            recipient="bob",
+            text="Hello",
+            idempotency_key="fail-key",
+        )
+
+    sends = storage.list_outbound_sends(account_id=account_id, status="failed")
+    assert len(sends) == 1
+    assert sends[0]["last_error"] == "HTTP 401"
+    assert sends[0]["attempts"] == 1
+
+
+def test_run_send_rejects_pending_record(storage, account_id):
+    """A pending record blocks concurrent sends instead of racing."""
+    storage.create_or_get_outbound_send(
+        account_id=account_id,
+        idempotency_key="in-flight",
+        recipient="bob",
+        text="Hello",
+    )
+
+    provider = MagicMock(spec=LinkedInProvider)
+    with pytest.raises(RuntimeError, match="already in progress"):
+        run_send(
+            account_id=account_id,
+            storage=storage,
+            provider=provider,
+            recipient="bob",
+            text="Hello",
+            idempotency_key="in-flight",
+        )
+    provider.send_message.assert_not_called()
+
+
+def test_run_send_rejects_payload_mismatch(storage, account_id):
+    """Reusing a key with different recipient/text raises instead of silently deduping."""
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.return_value = "msg-original"
+
+    run_send(
+        account_id=account_id,
+        storage=storage,
+        provider=provider,
+        recipient="alice",
+        text="First message",
+        idempotency_key="reused-key",
+    )
+    assert provider.send_message.call_count == 1
+
+    with pytest.raises(ValueError, match="different recipient/text"):
+        run_send(
+            account_id=account_id,
+            storage=storage,
+            provider=provider,
+            recipient="bob",
+            text="Different message",
+            idempotency_key="reused-key",
+        )
+    assert provider.send_message.call_count == 1
 
 
 # --- API tests (patched storage) ---
@@ -437,3 +647,99 @@ def test_send_endpoint_422_for_empty_text(storage, account_id):
             },
         )
     assert resp.status_code == 422
+
+
+# --- GET /sends endpoint tests ---
+
+
+def test_sends_endpoint_returns_records(storage, account_id):
+    from unittest.mock import patch, MagicMock
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.return_value = "msg-sends-1"
+
+    with patch("apps.api.main.storage", storage), patch(
+        "apps.api.main.LinkedInProvider", return_value=provider
+    ):
+        client = TestClient(app)
+        client.post(
+            "/send",
+            json={"account_id": account_id, "recipient": "alice", "text": "hi"},
+        )
+        resp = client.get(f"/sends?account_id={account_id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["sends"]) == 1
+    assert data["sends"][0]["status"] == "sent"
+    assert data["sends"][0]["recipient"] == "alice"
+
+
+def test_sends_endpoint_filters_by_status(storage, account_id):
+    from unittest.mock import patch, MagicMock
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.return_value = "msg-filter-1"
+
+    with patch("apps.api.main.storage", storage), patch(
+        "apps.api.main.LinkedInProvider", return_value=provider
+    ):
+        client = TestClient(app)
+        client.post(
+            "/send",
+            json={"account_id": account_id, "recipient": "bob", "text": "hey"},
+        )
+        resp_sent = client.get(f"/sends?account_id={account_id}&status=sent")
+        resp_failed = client.get(f"/sends?account_id={account_id}&status=failed")
+    assert resp_sent.status_code == 200
+    assert len(resp_sent.json()["sends"]) == 1
+    assert resp_failed.status_code == 200
+    assert len(resp_failed.json()["sends"]) == 0
+
+
+def test_sends_endpoint_422_on_invalid_status(storage, account_id):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        resp = client.get(f"/sends?account_id={account_id}&status=bogus")
+    assert resp.status_code == 422
+
+
+# --- Cross-account idempotency key isolation ---
+
+
+def test_run_send_same_key_different_accounts_are_independent(storage):
+    auth = AccountAuth(li_at="test-li-at", jsessionid=None)
+    acct_1 = storage.create_account(label="a1", auth=auth, proxy=None)
+    acct_2 = storage.create_account(label="a2", auth=auth, proxy=None)
+
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.side_effect = ["msg-acct1", "msg-acct2"]
+
+    r1 = run_send(
+        account_id=acct_1,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key="shared-key",
+    )
+    r2 = run_send(
+        account_id=acct_2,
+        storage=storage,
+        provider=provider,
+        recipient="bob",
+        text="Hello",
+        idempotency_key="shared-key",
+    )
+    assert r1.platform_message_id == "msg-acct1"
+    assert r2.platform_message_id == "msg-acct2"
+    assert r1.was_duplicate is False
+    assert r2.was_duplicate is False
+    assert provider.send_message.call_count == 2

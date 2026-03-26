@@ -4,11 +4,16 @@ Reusable by the API and future CLI. Aligned to provider and storage stubs.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
+
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
+
+logger = logging.getLogger(__name__)
 
 _DELAY_BETWEEN_PAGES_S = 1.5
 
@@ -25,6 +30,15 @@ class SyncResult:
     messages_inserted: int
     messages_skipped_duplicate: int
     pages_fetched: int
+
+
+@dataclass(frozen=True)
+class SendResult:
+    """Outcome of a run_send call with durable status tracking."""
+    send_id: int
+    platform_message_id: Optional[str]
+    status: str  # "sent" | "failed" | "pending"
+    was_duplicate: bool
 
 
 def run_sync(
@@ -105,16 +119,70 @@ def run_send(
     recipient: str,
     text: str,
     idempotency_key: str | None,
-) -> str:
-    """Send one message via provider. Returns platform_message_id.
+) -> SendResult:
+    """Send one message via provider with durable idempotency.
 
-    Persists the outbound message in storage for local archive (thread keyed by recipient).
+    Creates (or retrieves) a persistent outbound send record *before*
+    calling the provider.  If the same ``idempotency_key`` was already
+    used and the send succeeded, the cached result is returned without
+    contacting LinkedIn again.  Failed records are retried; pending
+    records raise ``RuntimeError`` to prevent concurrent duplicate sends.
+    Reusing a key with different recipient/text raises ``ValueError``.
+
+    On success the outbound message is also archived in the ``messages``
+    table (existing behavior).
     """
-    platform_message_id = provider.send_message(
+    send_id, existing = storage.create_or_get_outbound_send(
+        account_id=account_id,
+        idempotency_key=idempotency_key,
         recipient=recipient,
         text=text,
-        idempotency_key=idempotency_key,
     )
+
+    if existing is not None:
+        if existing["recipient"] != recipient or existing["text"] != text:
+            raise ValueError(
+                f"Idempotency key {idempotency_key!r} already used with different "
+                f"recipient/text. Use a new key for a different message."
+            )
+        if existing["status"] == "sent":
+            logger.info(
+                "Idempotency hit (send_id=%d, key=%s) — returning cached result",
+                send_id,
+                idempotency_key,
+            )
+            return SendResult(
+                send_id=send_id,
+                platform_message_id=existing["platform_message_id"],
+                status="sent",
+                was_duplicate=True,
+            )
+        if existing["status"] == "pending":
+            raise RuntimeError(
+                f"Send {send_id} is already in progress (status=pending). "
+                f"Retry after it completes or fails."
+            )
+        logger.info(
+            "Retrying send_id=%d (status=%s, attempts=%d)",
+            send_id,
+            existing["status"],
+            existing["attempts"],
+        )
+
+    try:
+        platform_message_id = provider.send_message(
+            recipient=recipient,
+            text=text,
+        )
+    except Exception as exc:
+        storage.mark_outbound_failed(send_id=send_id, error=str(exc))
+        raise
+
+    storage.mark_outbound_sent(
+        send_id=send_id,
+        platform_message_id=platform_message_id,
+    )
+
     thread_id = storage.upsert_thread(
         account_id=account_id,
         platform_thread_id=recipient,
@@ -130,4 +198,9 @@ def run_send(
         sent_at=datetime.now(timezone.utc),
         raw=None,
     )
-    return platform_message_id
+    return SendResult(
+        send_id=send_id,
+        platform_message_id=platform_message_id,
+        status="sent",
+        was_duplicate=False,
+    )

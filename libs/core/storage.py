@@ -53,6 +53,25 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_account_id ON messages(account_id);
 """
 
+_MIGRATION_3_OUTBOUND_SENDS = """
+CREATE TABLE IF NOT EXISTS outbound_sends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL,
+  idempotency_key TEXT,
+  recipient TEXT NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+  platform_message_id TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(account_id, idempotency_key),
+  FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_account_status ON outbound_sends(account_id, status);
+"""
+
 
 class Storage:
     """SQLite storage.
@@ -147,7 +166,11 @@ class Storage:
             self._conn.commit()
 
         current = self._get_schema_version()
-        migrations: list[tuple[int, str]] = [(1, _MIGRATION_1_INDEXES), (2, _MIGRATION_2_MESSAGES_CHECK)]
+        migrations: list[tuple[int, str]] = [
+            (1, _MIGRATION_1_INDEXES),
+            (2, _MIGRATION_2_MESSAGES_CHECK),
+            (3, _MIGRATION_3_OUTBOUND_SENDS),
+        ]
         for version, sql in migrations:
             if version > current:
                 self._conn.executescript(sql)
@@ -288,3 +311,126 @@ class Storage:
             if "UNIQUE constraint failed" in str(e):
                 return False
             raise
+
+    # ------------------------------------------------------------------
+    # Outbound send tracking
+    # ------------------------------------------------------------------
+
+    _VALID_SEND_STATUSES = frozenset({"pending", "sent", "failed"})
+
+    def create_or_get_outbound_send(
+        self,
+        *,
+        account_id: int,
+        idempotency_key: Optional[str],
+        recipient: str,
+        text: str,
+    ) -> tuple[int, Optional[dict[str, Any]]]:
+        """Create a pending outbound send record, or return an existing one.
+
+        When *idempotency_key* is non-None and a record already exists for the
+        same ``(account_id, idempotency_key)`` pair, the existing row is
+        returned without creating a duplicate.  SQLite treats NULL as distinct
+        for UNIQUE constraints, so calls with ``idempotency_key=None`` always
+        create a new record.
+
+        Returns:
+            ``(send_id, existing_row_or_None)``.  If the second element is not
+            None the caller should inspect its ``status`` to decide whether to
+            re-attempt the send.
+        """
+        if idempotency_key is not None:
+            existing = self._conn.execute(
+                "SELECT * FROM outbound_sends WHERE account_id=? AND idempotency_key=?",
+                (account_id, idempotency_key),
+            ).fetchone()
+            if existing:
+                return int(existing["id"]), dict(existing)
+
+        now = utcnow().isoformat()
+        try:
+            cur = self._conn.execute(
+                """
+                INSERT INTO outbound_sends(
+                  account_id, idempotency_key, recipient, text, status, attempts, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                (account_id, idempotency_key, recipient, text, now, now),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid), None
+        except sqlite3.IntegrityError:
+            if idempotency_key is None:
+                raise
+            row = self._conn.execute(
+                "SELECT * FROM outbound_sends WHERE account_id=? AND idempotency_key=?",
+                (account_id, idempotency_key),
+            ).fetchone()
+            if row:
+                return int(row["id"]), dict(row)
+            raise
+
+    def mark_outbound_sent(
+        self,
+        *,
+        send_id: int,
+        platform_message_id: str,
+    ) -> None:
+        """Atomically mark an outbound send as successfully sent."""
+        now = utcnow().isoformat()
+        self._conn.execute(
+            """
+            UPDATE outbound_sends
+            SET status='sent', platform_message_id=?, attempts=attempts+1, updated_at=?
+            WHERE id=?
+            """,
+            (platform_message_id, now, send_id),
+        )
+        self._conn.commit()
+
+    def mark_outbound_failed(
+        self,
+        *,
+        send_id: int,
+        error: str,
+    ) -> None:
+        """Atomically mark an outbound send as failed."""
+        now = utcnow().isoformat()
+        self._conn.execute(
+            """
+            UPDATE outbound_sends
+            SET status='failed', last_error=?, attempts=attempts+1, updated_at=?
+            WHERE id=?
+            """,
+            (error, now, send_id),
+        )
+        self._conn.commit()
+
+    def get_outbound_send(self, *, send_id: int) -> Optional[dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT * FROM outbound_sends WHERE id=?",
+            (send_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_outbound_sends(
+        self,
+        *,
+        account_id: int,
+        status: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        if status is not None and status not in self._VALID_SEND_STATUSES:
+            raise ValueError(
+                f"invalid status filter {status!r}; expected one of {sorted(self._VALID_SEND_STATUSES)}"
+            )
+        if status:
+            rows = self._conn.execute(
+                "SELECT * FROM outbound_sends WHERE account_id=? AND status=? ORDER BY id DESC",
+                (account_id, status),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM outbound_sends WHERE account_id=? ORDER BY id DESC",
+                (account_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]

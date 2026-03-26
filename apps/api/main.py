@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
-from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.job_runner import run_send, run_sync, SendResult, SyncResult
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
@@ -193,7 +193,7 @@ def send_message(body: SendIn):
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
     provider = LinkedInProvider(auth=auth, proxy=proxy)
     try:
-        platform_message_id = run_send(
+        result: SendResult = run_send(
             account_id=body.account_id,
             storage=storage,
             provider=provider,
@@ -201,7 +201,17 @@ def send_message(body: SendIn):
             text=body.text,
             idempotency_key=body.idempotency_key,
         )
-        return {"ok": True, "platform_message_id": platform_message_id}
+        return {
+            "ok": True,
+            "send_id": result.send_id,
+            "platform_message_id": result.platform_message_id,
+            "status": result.status,
+            "was_duplicate": result.was_duplicate,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except PermissionError as exc:
         raise HTTPException(
             status_code=401,
@@ -212,3 +222,13 @@ def send_message(body: SendIn):
             status_code=501,
             detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
         ) from None
+
+
+@app.get("/sends")
+def list_sends(account_id: int, status: str | None = None):
+    """Query outbound send records for an account, optionally filtered by status."""
+    try:
+        sends = storage.list_outbound_sends(account_id=account_id, status=status)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return {"sends": sends}

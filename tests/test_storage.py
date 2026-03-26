@@ -56,8 +56,8 @@ def test_schema_version_exists_after_migrate(storage):
 
 
 def test_schema_version_is_current_after_migrate(storage):
-    """Regression: migrate() leaves schema at current version (2 = indexes + messages CHECK)."""
-    assert storage._get_schema_version() == 2
+    """Regression: migrate() leaves schema at current version (3 = outbound_sends)."""
+    assert storage._get_schema_version() == 3
 
 
 def test_migrate_idempotent(storage):
@@ -116,7 +116,7 @@ def test_migrate_upgrades_preexisting_baseline_db(tmp_path):
     s.migrate()
 
     # Verify schema_version is current.
-    assert s._get_schema_version() == 2
+    assert s._get_schema_version() == 3
 
     # Verify indexes exist.
     indexes = {r[0] for r in s._conn.execute(

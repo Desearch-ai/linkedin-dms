@@ -14,7 +14,7 @@ from typing import Sequence
 
 import httpx
 
-from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.job_runner import run_send, run_sync, SendResult, SyncResult
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging
 from libs.core.storage import Storage
@@ -188,7 +188,7 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
         return loaded
     provider = loaded
     try:
-        platform_message_id = run_send(
+        result: SendResult = run_send(
             account_id=args.account_id,
             storage=storage,
             provider=provider,
@@ -196,10 +196,10 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
             text=text,
             idempotency_key=idem,
         )
-    except (NotImplementedError, ValueError):
+    except NotImplementedError:
         _stderr(_PROVIDER_TODO)
         return 1
-    except (PermissionError, ConnectionError, RuntimeError) as exc:
+    except (ValueError, PermissionError, ConnectionError, RuntimeError) as exc:
         _stderr(f"error: {exc}")
         return 1
     except httpx.HTTPStatusError as exc:
@@ -211,7 +211,13 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
         _stderr("error: send failed unexpectedly")
         return 1
 
-    print(json.dumps({"ok": True, "platform_message_id": platform_message_id}))
+    print(json.dumps({
+        "ok": True,
+        "send_id": result.send_id,
+        "platform_message_id": result.platform_message_id,
+        "status": result.status,
+        "was_duplicate": result.was_duplicate,
+    }))
     return 0
 
 
