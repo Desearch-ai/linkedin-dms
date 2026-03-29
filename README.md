@@ -279,6 +279,35 @@ proxy_url=http://u:p@host:8080   →  proxy_url=[REDACTED]
 - [ ] LinkedIn provider: send DM (TBD)
 - [ ] Proxy + per-account rate limiting
 
+## Docker
+
+### Quick Start with Docker
+
+```bash
+# Copy environment file and edit with your settings
+cp .env.example .env
+
+# Build and run
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+```
+
+### Build manually
+
+```bash
+docker build -t linkedin-dms .
+docker run -d --env-file .env -p 8000:8000 linkedin-dms
+```
+
+Once running, the API is available at:
+- Health: http://localhost:8000/health
+- Swagger UI: http://localhost:8000/docs
+
 ---
 
 If you want to help, start with the issues in this repo.

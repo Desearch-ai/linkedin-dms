@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 .env.*
+!.env.example
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
@@ -11,3 +12,4 @@ __pycache__/
 *.db-wal
 .DS_Store
 desearch_dms.egg-info/
+logs/
