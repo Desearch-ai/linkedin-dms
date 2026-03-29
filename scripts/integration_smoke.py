@@ -4,7 +4,12 @@ Run from repo root after uv sync (or pip install). Exit 0 iff all checks pass.
 """
 from __future__ import annotations
 
+import logging
 import sys
+
+
+logger = logging.getLogger(__name__)
+
 
 def main() -> int:
     from pathlib import Path
@@ -12,26 +17,29 @@ def main() -> int:
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
+    from libs.core.logging_config import setup_logging
+    setup_logging(log_dir="-")  # console-only for the smoke script
+
     from fastapi.testclient import TestClient
     from apps.api.main import app
 
     client = TestClient(app)
     r = client.get("/health")
     if r.status_code != 200 or not r.json().get("ok"):
-        print("FAIL /health", r.status_code, r.json())
+        logger.error("FAIL /health: status=%s body=%s", r.status_code, r.json())
         return 1
     r = client.post("/sync", json={"account_id": 99999, "limit_per_thread": 50})
     if r.status_code != 404:
-        print("FAIL /sync unknown account expected 404", r.status_code)
+        logger.error("FAIL /sync unknown account expected 404, got %s", r.status_code)
         return 1
     r = client.post(
         "/send",
         json={"account_id": 99999, "recipient": "x", "text": "hi", "idempotency_key": None},
     )
     if r.status_code != 404:
-        print("FAIL /send unknown account expected 404", r.status_code)
+        logger.error("FAIL /send unknown account expected 404, got %s", r.status_code)
         return 1
-    print("integration_smoke OK")
+    logger.info("integration_smoke OK")
     return 0
 
 

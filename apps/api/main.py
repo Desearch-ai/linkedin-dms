@@ -8,14 +8,15 @@ from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
 from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.logging_config import setup_logging
 from libs.core.models import AccountAuth, ProxyConfig
-from libs.core.redaction import configure_logging, redact_for_log, redact_string
+from libs.core.redaction import redact_for_log, redact_string
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
 
 logger = logging.getLogger(__name__)
 
-configure_logging()
+setup_logging()
 
 app = FastAPI(title="Desearch LinkedIn DMs", version="0.0.2")
 

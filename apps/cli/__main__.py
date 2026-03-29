@@ -15,8 +15,8 @@ from typing import Sequence
 import httpx
 
 from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.logging_config import setup_logging
 from libs.core.models import AccountAuth, ProxyConfig
-from libs.core.redaction import configure_logging
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
 
@@ -217,7 +217,7 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse CLI args, run command, return process exit code (0 = success)."""
-    configure_logging()
+    setup_logging()
     try:
         args = _parse_args(argv)
     except SystemExit as exc:
