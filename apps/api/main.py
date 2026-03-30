@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import logging
+import threading
+from collections import defaultdict
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
-from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.job_runner import run_send, run_sync, SyncConfig, SyncResult
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
@@ -21,6 +23,10 @@ app = FastAPI(title="Desearch LinkedIn DMs", version="0.0.2")
 
 storage = Storage()
 storage.migrate()
+
+# Per-account lock to prevent concurrent sync/send for the same account,
+# which would bypass rate-limit delays and risk LinkedIn flagging.
+_account_locks: dict[int, threading.Lock] = defaultdict(threading.Lock)
 
 
 class AuthCheckResponse(BaseModel):
@@ -87,6 +93,8 @@ class SyncIn(BaseModel):
         le=100,
         description="Max pages per thread (1=MVP); omit or null to exhaust cursor",
     )
+    delay_between_threads_s: float = Field(2.0, ge=1.0, le=60, description="Pause between threads (seconds, min 1.0)")
+    delay_between_pages_s: float = Field(1.5, ge=1.2, le=60, description="Pause between message pages (seconds, min 1.2 to stay under 50 req/min)")
 
 
 @app.get("/health")
@@ -129,7 +137,7 @@ def auth_check(account_id: int):
     except KeyError:
         return {"status": "failed", "error": "account not found"}
 
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=account_id)
     result = provider.check_auth()
 
     if result.ok:
@@ -146,19 +154,30 @@ def list_threads(account_id: int):
 @app.post("/sync")
 def sync_account(body: SyncIn):
     """Trigger a sync. Default one page per thread (MVP); set max_pages_per_thread or null to exhaust."""
+    lock = _account_locks[body.account_id]
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Sync already in progress for account {body.account_id}",
+        )
     try:
-        auth = storage.get_account_auth(body.account_id)
-        proxy = storage.get_account_proxy(body.account_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
-    try:
+        try:
+            auth = storage.get_account_auth(body.account_id)
+            proxy = storage.get_account_proxy(body.account_id)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
+        provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
+        sync_config = SyncConfig(
+            delay_between_threads_s=body.delay_between_threads_s,
+            delay_between_pages_s=body.delay_between_pages_s,
+        )
         result: SyncResult = run_sync(
             account_id=body.account_id,
             storage=storage,
             provider=provider,
             limit_per_thread=body.limit_per_thread,
             max_pages_per_thread=body.max_pages_per_thread,
+            sync_config=sync_config,
         )
         return {
             "ok": True,
@@ -166,6 +185,7 @@ def sync_account(body: SyncIn):
             "messages_inserted": result.messages_inserted,
             "messages_skipped_duplicate": result.messages_skipped_duplicate,
             "pages_fetched": result.pages_fetched,
+            "rate_limited": result.rate_limited,
         }
     except PermissionError as exc:
         raise HTTPException(
@@ -182,17 +202,25 @@ def sync_account(body: SyncIn):
             status_code=422,
             detail=redact_string(str(e)),
         ) from None
+    finally:
+        lock.release()
 
 
 @app.post("/send")
 def send_message(body: SendIn):
+    lock = _account_locks[body.account_id]
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Operation already in progress for account {body.account_id}",
+        )
     try:
-        auth = storage.get_account_auth(body.account_id)
-        proxy = storage.get_account_proxy(body.account_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
-    try:
+        try:
+            auth = storage.get_account_auth(body.account_id)
+            proxy = storage.get_account_proxy(body.account_id)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
+        provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
         platform_message_id = run_send(
             account_id=body.account_id,
             storage=storage,
@@ -212,3 +240,5 @@ def send_message(body: SendIn):
             status_code=501,
             detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
         ) from None
+    finally:
+        lock.release()

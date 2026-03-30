@@ -34,7 +34,7 @@ _BASE_HEADERS = {
 _MIN_SEND_INTERVAL_S = 2.0
 _MAX_NETWORK_RETRIES = 3
 _NETWORK_RETRY_DELAY_S = 5.0
-_MAX_RATE_LIMIT_RETRIES = 5
+_MAX_RATE_LIMIT_RETRIES = 6  # separate budget for rate-limit responses
 _BACKOFF_START_S = 30.0
 _BACKOFF_MAX_S = 900.0  # 15 min
 
@@ -46,10 +46,12 @@ _VOYAGER_BASE = "https://www.linkedin.com/voyager/api"
 _GRAPHQL_BASE = f"{_VOYAGER_BASE}/voyagerMessagingGraphQL/graphql"
 _VOYAGER_TIMEOUT_S = 30.0
 _MAX_PAGES = 50
-_DELAY_BETWEEN_PAGES_S = 1.5
-_RETRY_MAX_ATTEMPTS = 3
-_RETRY_BASE_DELAY_S = 2.0
-_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_DELAY_BETWEEN_THREAD_LIST_PAGES_S = 6.0  # ~10 req/min safe for thread list
+_SERVER_ERROR_MAX_ATTEMPTS = 3
+_SERVER_ERROR_BASE_DELAY_S = 2.0
+_RATE_LIMIT_STATUS_CODES = frozenset({429, 999})
+_SERVER_ERROR_STATUS_CODES = frozenset({500, 502, 503, 504})
+_RETRYABLE_STATUS_CODES = _RATE_LIMIT_STATUS_CODES | _SERVER_ERROR_STATUS_CODES
 _PLAYWRIGHT_NAV_RETRIES = 2
 
 # NOTE: These queryId hashes are extracted from LinkedIn's frontend JS bundle.
@@ -324,9 +326,11 @@ class LinkedInProvider:
     - Do NOT implement CAPTCHA/2FA bypass.
     """
 
-    def __init__(self, *, auth: AccountAuth, proxy: Optional[ProxyConfig] = None):
+    def __init__(self, *, auth: AccountAuth, proxy: Optional[ProxyConfig] = None, account_id: Optional[int] = None):
         self.auth = auth
         self.proxy = proxy
+        self.account_id = account_id
+        self.rate_limit_encountered: bool = False
         # send_message state (upstream)
         self._sent_keys: dict[str, str] = {}
         self._last_send_ts: float = 0.0
@@ -438,40 +442,87 @@ class LinkedInProvider:
         }
         cookies = self._build_basic_cookies()
         try:
-            resp = client.get(f"{_VOYAGER_BASE}/me", headers=headers, cookies=cookies)
+            resp = self._get_with_retry(
+                client, f"{_VOYAGER_BASE}/me", headers=headers, cookies=cookies,
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 self._profile_id = data.get("entityUrn") or data.get("publicIdentifier")
+        except PermissionError:
+            raise
         except Exception:
             logger.debug("_get_profile_id: failed to fetch /me", exc_info=True)
         self._profile_id_fetched = True
         return self._profile_id
 
     def _get_with_retry(self, client: httpx.Client, url: str, **kwargs: Any) -> httpx.Response:
-        last_exc: Optional[httpx.HTTPStatusError] = None
-        for attempt in range(_RETRY_MAX_ATTEMPTS):
-            resp = client.get(url, **kwargs)
+        """GET with separate retry budgets for network, rate-limit, and server errors."""
+        acct = self.account_id or "[unknown]"
+        network_failures = 0
+        rate_limit_attempts = 0
+        server_error_attempts = 0
+
+        while True:
+            try:
+                resp = client.get(url, **kwargs)
+            except (httpx.NetworkError, httpx.TimeoutException) as exc:
+                network_failures += 1
+                if network_failures >= _MAX_NETWORK_RETRIES:
+                    raise ConnectionError(
+                        f"GET failed after {network_failures} network retries"
+                    ) from exc
+                logger.warning(
+                    "Network error, account_id=%s, attempt %d/%d, retrying in %.0fs",
+                    acct, network_failures, _MAX_NETWORK_RETRIES, _NETWORK_RETRY_DELAY_S,
+                )
+                time.sleep(_NETWORK_RETRY_DELAY_S)
+                continue
+
+            if resp.status_code == 401:
+                logger.warning(
+                    "Cookie expiry detected (HTTP 401), account_id=%s. "
+                    "Re-authenticate via POST /accounts/refresh.", acct,
+                )
+                raise PermissionError(
+                    "LinkedIn session expired (HTTP 401). Re-authenticate."
+                )
+
             if resp.status_code not in _RETRYABLE_STATUS_CODES:
                 return resp
-            last_exc = httpx.HTTPStatusError(
-                str(resp.status_code), request=resp.request, response=resp,
-            )
-            if attempt == _RETRY_MAX_ATTEMPTS - 1:
-                break
-            delay = _RETRY_BASE_DELAY_S * (2 ** attempt)
-            if resp.status_code == 429:
+
+            if resp.status_code in _RATE_LIMIT_STATUS_CODES:
+                rate_limit_attempts += 1
+                self.rate_limit_encountered = True
+                if rate_limit_attempts >= _MAX_RATE_LIMIT_RETRIES:
+                    raise httpx.HTTPStatusError(
+                        str(resp.status_code), request=resp.request, response=resp,
+                    )
+                delay = min(
+                    _BACKOFF_START_S * (2 ** (rate_limit_attempts - 1)), _BACKOFF_MAX_S,
+                )
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after:
                     try:
                         delay = max(delay, float(retry_after))
                     except (TypeError, ValueError):
                         pass
-            logger.debug(
-                "retry: %d from LinkedIn, attempt %d/%d in %.1fs",
-                resp.status_code, attempt + 1, _RETRY_MAX_ATTEMPTS, delay,
-            )
+                logger.warning(
+                    "Rate-limit: HTTP %d, account_id=%s, attempt %d/%d, backoff %.1fs",
+                    resp.status_code, acct, rate_limit_attempts, _MAX_RATE_LIMIT_RETRIES, delay,
+                )
+            else:
+                server_error_attempts += 1
+                if server_error_attempts >= _SERVER_ERROR_MAX_ATTEMPTS:
+                    raise httpx.HTTPStatusError(
+                        str(resp.status_code), request=resp.request, response=resp,
+                    )
+                delay = _SERVER_ERROR_BASE_DELAY_S * (2 ** (server_error_attempts - 1))
+                logger.warning(
+                    "Server error: HTTP %d, account_id=%s, attempt %d/%d, retry in %.1fs",
+                    resp.status_code, acct, server_error_attempts, _SERVER_ERROR_MAX_ATTEMPTS, delay,
+                )
+
             time.sleep(delay)
-        raise last_exc  # type: ignore[misc]
 
     def _is_cf_blocked(self, resp: httpx.Response) -> bool:
         if resp.status_code in (302, 303):
@@ -586,7 +637,7 @@ class LinkedInProvider:
             sync_token = new_sync_token
 
             if page_num < _MAX_PAGES:
-                time.sleep(_DELAY_BETWEEN_PAGES_S)
+                time.sleep(_DELAY_BETWEEN_THREAD_LIST_PAGES_S)
         else:
             logger.warning(
                 "list_threads: reached max page limit (%d); %d threads fetched",
@@ -737,13 +788,13 @@ class LinkedInProvider:
 
         while True:
             try:
-                with httpx.Client(proxy=self._proxy_url(), timeout=30.0) as client:
-                    resp = client.post(
-                        _MESSAGING_URL,
-                        json=payload,
-                        headers=headers,
-                        cookies=self._get_cookies(),
-                    )
+                client = self._get_client()
+                resp = client.post(
+                    _MESSAGING_URL,
+                    json=payload,
+                    headers=headers,
+                    cookies=self._get_cookies(),
+                )
                 self._last_send_ts = time.monotonic()
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
                 network_failures += 1
@@ -753,7 +804,8 @@ class LinkedInProvider:
                         f"Send failed after {network_failures} network retries"
                     ) from exc
                 logger.warning(
-                    "Network error (attempt %d/%d), retrying in %.0fs",
+                    "Network error, account_id=%s, attempt %d/%d, retrying in %.0fs",
+                    self.account_id or "[unknown]",
                     network_failures,
                     _MAX_NETWORK_RETRIES,
                     _NETWORK_RETRY_DELAY_S,
@@ -761,9 +813,10 @@ class LinkedInProvider:
                 time.sleep(_NETWORK_RETRY_DELAY_S)
                 continue
 
-            if resp.status_code in (429, 999):
+            if resp.status_code in _RATE_LIMIT_STATUS_CODES:
+                self.rate_limit_encountered = True
                 rate_limit_hits += 1
-                if rate_limit_hits > _MAX_RATE_LIMIT_RETRIES:
+                if rate_limit_hits >= _MAX_RATE_LIMIT_RETRIES:
                     raise RuntimeError(
                         f"Rate-limited {rate_limit_hits} times, giving up"
                     )
@@ -771,8 +824,9 @@ class LinkedInProvider:
                     _BACKOFF_START_S * (2 ** (rate_limit_hits - 1)), _BACKOFF_MAX_S
                 )
                 logger.warning(
-                    "Rate limited (HTTP %d, attempt %d/%d), backing off %.0fs",
+                    "Rate-limit: HTTP %d, account_id=%s, attempt %d/%d, backoff %.0fs",
                     resp.status_code,
+                    self.account_id or "[unknown]",
                     rate_limit_hits,
                     _MAX_RATE_LIMIT_RETRIES,
                     backoff,
@@ -781,6 +835,11 @@ class LinkedInProvider:
                 continue
 
             if resp.status_code == 401:
+                logger.warning(
+                    "Cookie expiry detected (HTTP 401), account_id=%s. "
+                    "Re-authenticate via POST /accounts/refresh.",
+                    self.account_id or "[unknown]",
+                )
                 raise PermissionError(
                     "LinkedIn session expired (HTTP 401). Re-authenticate."
                 )

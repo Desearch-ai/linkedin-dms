@@ -14,7 +14,7 @@ from typing import Sequence
 
 import httpx
 
-from libs.core.job_runner import run_send, run_sync, SyncResult
+from libs.core.job_runner import run_send, run_sync, SyncConfig, SyncResult
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging
 from libs.core.storage import Storage
@@ -71,6 +71,20 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--exhaust-pagination",
         action="store_true",
         help="Follow cursors until exhausted (same as API max_pages_per_thread=null)",
+    )
+    p_sync.add_argument(
+        "--delay-threads",
+        type=float,
+        default=2.0,
+        metavar="SEC",
+        help="Seconds to pause between threads (default: 2.0)",
+    )
+    p_sync.add_argument(
+        "--delay-pages",
+        type=float,
+        default=1.5,
+        metavar="SEC",
+        help="Seconds to pause between fetch_messages pages (default: 1.5)",
     )
 
     p_send = sub.add_parser("send", help="Send one DM via the LinkedIn provider")
@@ -129,7 +143,7 @@ def _load_provider(storage: Storage, account_id: int) -> LinkedInProvider | int:
     except ValueError as exc:
         _stderr(f"error: {exc}")
         return 1
-    return LinkedInProvider(auth=auth, proxy=proxy)
+    return LinkedInProvider(auth=auth, proxy=proxy, account_id=account_id)
 
 
 def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:
@@ -138,6 +152,10 @@ def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:
         return loaded
     provider = loaded
     max_pages: int | None = args._resolved_max_pages  # type: ignore[attr-defined]
+    sync_config = SyncConfig(
+        delay_between_threads_s=args.delay_threads,
+        delay_between_pages_s=args.delay_pages,
+    )
     try:
         result: SyncResult = run_sync(
             account_id=args.account_id,
@@ -145,6 +163,7 @@ def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:
             provider=provider,
             limit_per_thread=args.limit_per_thread,
             max_pages_per_thread=max_pages,
+            sync_config=sync_config,
         )
     except (NotImplementedError, ValueError):
         _stderr(_PROVIDER_TODO)
@@ -160,6 +179,7 @@ def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:
         "messages_inserted": result.messages_inserted,
         "messages_skipped_duplicate": result.messages_skipped_duplicate,
         "pages_fetched": result.pages_fetched,
+        "rate_limited": result.rate_limited,
     }
     print(json.dumps(payload))
     return 0

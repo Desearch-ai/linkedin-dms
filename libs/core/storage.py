@@ -53,6 +53,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_account_id ON messages(account_id);
 """
 
+_MIGRATION_3_PROFILE_ID = """
+ALTER TABLE accounts ADD COLUMN profile_id TEXT;
+"""
+
 
 class Storage:
     """SQLite storage.
@@ -147,7 +151,7 @@ class Storage:
             self._conn.commit()
 
         current = self._get_schema_version()
-        migrations: list[tuple[int, str]] = [(1, _MIGRATION_1_INDEXES), (2, _MIGRATION_2_MESSAGES_CHECK)]
+        migrations: list[tuple[int, str]] = [(1, _MIGRATION_1_INDEXES), (2, _MIGRATION_2_MESSAGES_CHECK), (3, _MIGRATION_3_PROFILE_ID)]
         for version, sql in migrations:
             if version > current:
                 self._conn.executescript(sql)
@@ -249,6 +253,35 @@ class Storage:
             (account_id, thread_id, cursor, utcnow().isoformat()),
         )
         self._conn.commit()
+
+    def get_profile_id(self, account_id: int) -> Optional[str]:
+        """Return cached profile_id for an account, or None if not yet fetched."""
+        row = self._conn.execute(
+            "SELECT profile_id FROM accounts WHERE id=?", (account_id,)
+        ).fetchone()
+        if not row:
+            raise KeyError(f"account {account_id} not found")
+        return row["profile_id"]
+
+    def set_profile_id(self, account_id: int, profile_id: str) -> None:
+        """Cache the profile_id for an account to avoid repeated /me calls."""
+        self._conn.execute(
+            "UPDATE accounts SET profile_id=? WHERE id=?",
+            (profile_id, account_id),
+        )
+        self._conn.commit()
+
+    def get_daily_send_count(self, *, account_id: int) -> int:
+        """Count outbound messages sent today (UTC) for an account."""
+        today = utcnow().strftime("%Y-%m-%d")
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM messages
+            WHERE account_id=? AND direction='out' AND sent_at >= ?
+            """,
+            (account_id, today),
+        ).fetchone()
+        return int(row["cnt"]) if row else 0
 
     def insert_message(
         self,
