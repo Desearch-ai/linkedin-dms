@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=300" />
+  <title>Desearch LinkedIn Bridge</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      color: #1d1d1f;
+      background: #fafafa;
+      padding: 16px;
+    }
+
+    h1 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    .status-card {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .status-row:last-child { margin-bottom: 0; }
+
+    .status-label { color: #666; }
+
+    .status-value { font-weight: 500; }
+
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    .dot-connected { background: #34c759; }
+    .dot-error { background: #ff3b30; }
+    .dot-unknown { background: #999; }
+
+    .config-section {
+      margin-bottom: 12px;
+    }
+
+    .config-section label {
+      display: block;
+      font-size: 11px;
+      color: #666;
+      margin-bottom: 4px;
+    }
+
+    .config-section input {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    button {
+      flex: 1;
+      padding: 8px 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-primary { background: #0a66c2; color: #fff; }
+    .btn-secondary { background: #e8e8e8; color: #333; }
+
+    #result {
+      font-size: 11px;
+      color: #555;
+      margin-top: 8px;
+      max-height: 80px;
+      overflow-y: auto;
+      word-break: break-word;
+    }
+
+    .error-text { color: #ff3b30; }
+  </style>
+</head>
+<body>
+  <h1>Desearch LinkedIn Bridge</h1>
+
+  <div class="status-card">
+    <div class="status-row">
+      <span class="status-label">Status</span>
+      <span class="status-value" id="statusText">
+        <span class="status-dot dot-unknown" id="statusDot"></span>
+        <span id="statusLabel">Checking...</span>
+      </span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Account ID</span>
+      <span class="status-value" id="accountId">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Last updated</span>
+      <span class="status-value" id="lastUpdated">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Headers captured</span>
+      <span class="status-value" id="headersStatus">—</span>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <label for="backendUrl">Service URL</label>
+    <input type="text" id="backendUrl" placeholder="http://localhost:8899" />
+  </div>
+
+  <div class="btn-row">
+    <button class="btn-primary" id="btnSync">Sync Now</button>
+    <button class="btn-secondary" id="btnRefresh">Refresh Cookies</button>
+  </div>
+
+  <button class="btn-secondary" id="btnSaveConfig" style="width:100%">Save Config</button>
+
+  <div id="result"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
