@@ -1,0 +1,155 @@
+/* Desearch LinkedIn Bridge — Popup Styles */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  width: 340px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: #1d1d1f;
+  background: #fafafa;
+  padding: 16px;
+}
+
+h1 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.header {
+  margin-bottom: 12px;
+}
+
+/* Status badge under the title */
+.status-badge {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.status-connected    { color: #34c759; }
+.status-error        { color: #ff3b30; }
+.status-expired      { color: #e67e22; }
+.status-disconnected { color: #999; }
+
+/* Status card */
+.status-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.status-row:last-child { margin-bottom: 0; }
+
+.status-label {
+  color: #666;
+  font-size: 12px;
+}
+
+.status-value {
+  font-weight: 500;
+  font-size: 12px;
+  text-align: right;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Config section */
+.config-section {
+  margin-bottom: 12px;
+}
+
+.config-section label {
+  display: block;
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 4px;
+}
+
+.url-row {
+  display: flex;
+  gap: 6px;
+}
+
+.url-row input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.url-row button {
+  flex: none;
+  width: auto;
+  padding: 6px 12px;
+}
+
+.health-hint {
+  display: block;
+  font-size: 10px;
+  margin-top: 4px;
+  min-height: 14px;
+}
+
+/* Buttons */
+.btn-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+button {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+button:hover { opacity: 0.85; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-primary { background: #0a66c2; color: #fff; }
+.btn-secondary { background: #e8e8e8; color: #333; }
+.btn-danger {
+  background: none;
+  border: 1px solid #ccc;
+  color: #666;
+  font-size: 11px;
+  padding: 6px;
+}
+
+/* Result area */
+#result {
+  font-size: 11px;
+  color: #555;
+  margin-top: 8px;
+  max-height: 80px;
+  overflow-y: auto;
+  word-break: break-word;
+}
+
+.result-success { color: #34c759; }
+.result-error   { color: #ff3b30; }
+
+/* Footer */
+.footer {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #e8e8e8;
+}
