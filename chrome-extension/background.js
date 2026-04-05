@@ -54,6 +54,9 @@ chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
           JSESSIONID: jsession?.value?.replace(/"/g, "") || null,
         };
 
+        // Store cookie value for popup preview
+        await chrome.storage.local.set({ liAtValue: cookie.value });
+
         if (config.accountId) {
           await pushRefresh(config, cookies);
         } else {
@@ -177,6 +180,9 @@ async function handleManualRefresh() {
   if (!cookies.li_at) {
     throw new Error("Not logged in to LinkedIn — no li_at cookie found.");
   }
+
+  // Store cookie value for popup preview
+  await chrome.storage.local.set({ liAtValue: cookies.li_at });
 
   if (config.accountId) {
     await pushRefresh(config, cookies);

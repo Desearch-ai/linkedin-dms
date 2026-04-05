@@ -1,15 +1,17 @@
 // Desearch LinkedIn DMs — Popup UI Logic
 
-const statusDot = document.getElementById("statusDot");
-const statusLabel = document.getElementById("statusLabel");
+const statusBadge = document.getElementById("statusBadge");
 const accountIdEl = document.getElementById("accountId");
-const lastUpdatedEl = document.getElementById("lastUpdated");
+const cookieStatusEl = document.getElementById("cookieStatus");
 const headersStatusEl = document.getElementById("headersStatus");
+const lastUpdatedEl = document.getElementById("lastUpdated");
 const backendUrlInput = document.getElementById("backendUrl");
+const healthStatusEl = document.getElementById("healthStatus");
 const resultEl = document.getElementById("result");
 const btnSync = document.getElementById("btnSync");
 const btnRefresh = document.getElementById("btnRefresh");
 const btnSaveConfig = document.getElementById("btnSaveConfig");
+const btnDisconnect = document.getElementById("btnDisconnect");
 
 // ─── Load state ──────────────────────────────────────────────────────────────
 
@@ -22,27 +24,35 @@ async function loadState() {
     lastUpdated: null,
     xLiTrack: null,
     csrfToken: null,
+    liAtValue: null,
   });
 
   backendUrlInput.value = state.serviceUrl;
   accountIdEl.textContent = state.accountId ?? "—";
 
-  // Status indicator
+  // Status badge
   if (state.lastStatus === "connected") {
-    statusDot.className = "status-dot dot-connected";
-    statusLabel.textContent = "Connected";
+    statusBadge.textContent = "Connected";
+    statusBadge.className = "status-badge status-connected";
   } else if (state.lastStatus === "error") {
-    statusDot.className = "status-dot dot-error";
-    statusLabel.textContent = state.lastError || "Error";
+    statusBadge.textContent = state.lastError || "Error";
+    statusBadge.className = "status-badge status-error";
   } else {
-    statusDot.className = "status-dot dot-unknown";
-    statusLabel.textContent = "Not connected";
+    statusBadge.textContent = "Disconnected";
+    statusBadge.className = "status-badge status-disconnected";
+  }
+
+  // Cookie preview
+  if (state.liAtValue) {
+    cookieStatusEl.textContent = "..." + state.liAtValue.slice(-8);
+  } else {
+    cookieStatusEl.textContent = "—";
   }
 
   // Last updated
   if (state.lastUpdated) {
     const d = new Date(state.lastUpdated);
-    lastUpdatedEl.textContent = d.toLocaleTimeString();
+    lastUpdatedEl.textContent = d.toLocaleString();
   } else {
     lastUpdatedEl.textContent = "—";
   }
@@ -57,13 +67,37 @@ async function loadState() {
   } else {
     headersStatusEl.textContent = "—";
   }
+
+  // Disable sync if no account
+  btnSync.disabled = !state.accountId;
+}
+
+// ─── Health check ────────────────────────────────────────────────────────────
+
+async function checkHealth() {
+  healthStatusEl.textContent = "Checking...";
+  healthStatusEl.className = "health-hint";
+  try {
+    const { serviceUrl } = await chrome.storage.local.get({ serviceUrl: "http://localhost:8899" });
+    const resp = await fetch(`${serviceUrl}/health`, { method: "GET" });
+    if (resp.ok) {
+      healthStatusEl.textContent = "Service reachable";
+      healthStatusEl.className = "health-hint status-connected";
+    } else {
+      healthStatusEl.textContent = "Service returned " + resp.status;
+      healthStatusEl.className = "health-hint status-error";
+    }
+  } catch {
+    healthStatusEl.textContent = "Service unreachable";
+    healthStatusEl.className = "health-hint status-error";
+  }
 }
 
 // ─── Actions ─────────────────────────────────────────────────────────────────
 
-function showResult(text, isError = false) {
+function showResult(text, type = "info") {
   resultEl.textContent = text;
-  resultEl.className = isError ? "error-text" : "";
+  resultEl.className = type === "error" ? "result-error" : type === "success" ? "result-success" : "";
 }
 
 function setButtonsDisabled(disabled) {
@@ -74,50 +108,65 @@ function setButtonsDisabled(disabled) {
 btnSaveConfig.addEventListener("click", async () => {
   const url = backendUrlInput.value.trim().replace(/\/+$/, "");
   if (!url) {
-    showResult("Backend URL is required.", true);
+    showResult("Service URL is required.", "error");
     return;
   }
   await chrome.storage.local.set({ serviceUrl: url });
-  showResult("Config saved.");
+  showResult("Config saved.", "success");
+  checkHealth();
 });
 
 btnSync.addEventListener("click", async () => {
   setButtonsDisabled(true);
-  showResult("Syncing...");
+  btnSync.textContent = "Syncing...";
+  showResult("");
   try {
     const resp = await chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
     if (resp.ok) {
       const d = resp.data;
       showResult(
-        `Synced ${d.synced_threads} threads, ${d.messages_inserted} new messages.`
+        `Synced ${d.synced_threads} threads, ${d.messages_inserted} new messages.`,
+        "success"
       );
     } else {
-      showResult(resp.error || "Sync failed.", true);
+      showResult(resp.error || "Sync failed.", "error");
     }
   } catch (err) {
-    showResult(err.message, true);
+    showResult(err.message, "error");
   }
+  btnSync.textContent = "Sync Now";
   setButtonsDisabled(false);
   await loadState();
 });
 
 btnRefresh.addEventListener("click", async () => {
   setButtonsDisabled(true);
-  showResult("Refreshing cookies...");
+  btnRefresh.textContent = "Refreshing...";
+  showResult("");
   try {
     const resp = await chrome.runtime.sendMessage({ type: "MANUAL_REFRESH" });
     if (resp.ok) {
-      showResult("Cookies refreshed successfully.");
+      showResult("Cookies refreshed successfully.", "success");
     } else {
-      showResult(resp.error || "Refresh failed.", true);
+      showResult(resp.error || "Refresh failed.", "error");
     }
   } catch (err) {
-    showResult(err.message, true);
+    showResult(err.message, "error");
   }
+  btnRefresh.textContent = "Refresh Cookies";
   setButtonsDisabled(false);
   await loadState();
+});
+
+btnDisconnect.addEventListener("click", async () => {
+  if (!confirm("Disconnect? This clears all local extension state.")) return;
+  await chrome.storage.local.clear();
+  showResult("");
+  await loadState();
+  checkHealth();
 });
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
 loadState();
+checkHealth();
