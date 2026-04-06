@@ -2,32 +2,61 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=340" />
+  <meta name="viewport" content="width=380" />
   <title>Desearch LinkedIn Bridge</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
   <div class="header">
-    <h1>Desearch LinkedIn Bridge</h1>
-    <span class="status-badge status-disconnected" id="statusBadge">Disconnected</span>
+    <div class="header-left">
+      <div class="logo-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+        </svg>
+      </div>
+      <h1>Desearch Bridge</h1>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="status-badge status-disconnected" id="statusBadge">
+        <span class="status-dot"></span>
+        <span id="statusText">Disconnected</span>
+      </span>
+      <button class="theme-toggle" id="btnTheme" title="Toggle theme">
+        <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+    </div>
   </div>
 
   <div class="status-card">
     <div class="status-row">
-      <span class="status-label">Account ID</span>
-      <span class="status-value" id="accountId">—</span>
+      <span class="status-label">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        Account ID
+      </span>
+      <span class="status-value" id="accountId">&mdash;</span>
     </div>
     <div class="status-row">
-      <span class="status-label">Cookie</span>
-      <span class="status-value" id="cookieStatus">—</span>
+      <span class="status-label">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        Cookie
+      </span>
+      <span class="status-value" id="cookieStatus">&mdash;</span>
     </div>
     <div class="status-row">
-      <span class="status-label">Headers captured</span>
-      <span class="status-value" id="headersStatus">—</span>
+      <span class="status-label">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Headers captured
+      </span>
+      <span class="status-value" id="headersStatus">&mdash;</span>
     </div>
     <div class="status-row">
-      <span class="status-label">Last updated</span>
-      <span class="status-value" id="lastUpdated">—</span>
+      <span class="status-label">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Last updated
+      </span>
+      <span class="status-value" id="lastUpdated">&mdash;</span>
     </div>
   </div>
 
@@ -41,8 +70,14 @@
   </div>
 
   <div class="btn-row">
-    <button class="btn-primary" id="btnSync">Sync Now</button>
-    <button class="btn-secondary" id="btnRefresh">Refresh Cookies</button>
+    <button class="btn-primary" id="btnSync">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Sync Now
+    </button>
+    <button class="btn-secondary" id="btnRefresh">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+      Refresh
+    </button>
   </div>
 
   <div id="result"></div>

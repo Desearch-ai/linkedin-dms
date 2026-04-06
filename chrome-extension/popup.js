@@ -1,6 +1,7 @@
 // Desearch LinkedIn DMs — Popup UI Logic
 
 const statusBadge = document.getElementById("statusBadge");
+const statusText = document.getElementById("statusText");
 const accountIdEl = document.getElementById("accountId");
 const cookieStatusEl = document.getElementById("cookieStatus");
 const headersStatusEl = document.getElementById("headersStatus");
@@ -12,6 +13,7 @@ const btnSync = document.getElementById("btnSync");
 const btnRefresh = document.getElementById("btnRefresh");
 const btnSaveConfig = document.getElementById("btnSaveConfig");
 const btnDisconnect = document.getElementById("btnDisconnect");
+const syncLabel = btnSync.textContent;
 
 // ─── Load state ──────────────────────────────────────────────────────────────
 
@@ -32,13 +34,13 @@ async function loadState() {
 
   // Status badge
   if (state.lastStatus === "connected") {
-    statusBadge.textContent = "Connected";
+    statusText.textContent = "Connected";
     statusBadge.className = "status-badge status-connected";
   } else if (state.lastStatus === "error") {
-    statusBadge.textContent = state.lastError || "Error";
+    statusText.textContent = state.lastError || "Error";
     statusBadge.className = "status-badge status-error";
   } else {
-    statusBadge.textContent = "Disconnected";
+    statusText.textContent = "Disconnected";
     statusBadge.className = "status-badge status-disconnected";
   }
 
@@ -117,8 +119,10 @@ btnSaveConfig.addEventListener("click", async () => {
 });
 
 btnSync.addEventListener("click", async () => {
+  const originalHTML = btnSync.innerHTML;
   setButtonsDisabled(true);
-  btnSync.textContent = "Syncing...";
+  btnSync.classList.add("syncing");
+  btnSync.innerHTML = originalHTML.replace("Sync Now", "Syncing\u2026");
   showResult("");
   try {
     const resp = await chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
@@ -134,14 +138,16 @@ btnSync.addEventListener("click", async () => {
   } catch (err) {
     showResult(err.message, "error");
   }
-  btnSync.textContent = "Sync Now";
+  btnSync.innerHTML = originalHTML;
+  btnSync.classList.remove("syncing");
   setButtonsDisabled(false);
   await loadState();
 });
 
 btnRefresh.addEventListener("click", async () => {
+  const originalHTML = btnRefresh.innerHTML;
   setButtonsDisabled(true);
-  btnRefresh.textContent = "Refreshing...";
+  btnRefresh.innerHTML = originalHTML.replace("Refresh", "Refreshing\u2026");
   showResult("");
   try {
     const resp = await chrome.runtime.sendMessage({ type: "MANUAL_REFRESH" });
@@ -153,7 +159,7 @@ btnRefresh.addEventListener("click", async () => {
   } catch (err) {
     showResult(err.message, "error");
   }
-  btnRefresh.textContent = "Refresh Cookies";
+  btnRefresh.innerHTML = originalHTML;
   setButtonsDisabled(false);
   await loadState();
 });
@@ -166,7 +172,28 @@ btnDisconnect.addEventListener("click", async () => {
   checkHealth();
 });
 
+// ─── Theme ──────────────────────────────────────────────────────────────────
+
+const btnTheme = document.getElementById("btnTheme");
+
+function applyTheme(theme) {
+  document.documentElement.classList.toggle("light", theme === "light");
+}
+
+async function loadTheme() {
+  const { theme } = await chrome.storage.local.get({ theme: "dark" });
+  applyTheme(theme);
+}
+
+btnTheme.addEventListener("click", async () => {
+  const isLight = document.documentElement.classList.contains("light");
+  const next = isLight ? "dark" : "light";
+  applyTheme(next);
+  await chrome.storage.local.set({ theme: next });
+});
+
 // ─── Init ────────────────────────────────────────────────────────────────────
 
+loadTheme();
 loadState();
 checkHealth();
