@@ -78,6 +78,72 @@ Useful endpoints:
 
 Swagger UI is available at <http://127.0.0.1:8899/docs>.
 
+### API request and response shape
+
+`GET /health`
+
+```json
+{"ok": true}
+```
+
+`POST /accounts`
+
+```json
+{
+  "label": "sales-1",
+  "cookies": "li_at=REDACTED; JSESSIONID=ajax:REDACTED",
+  "proxy_url": "http://user:pass@proxy.example:8080"
+}
+```
+
+```json
+{"account_id": 1}
+```
+
+`POST /sync`
+
+```json
+{
+  "account_id": 1,
+  "limit_per_thread": 50,
+  "max_pages_per_thread": 1,
+  "delay_between_threads_s": 2.0,
+  "delay_between_pages_s": 1.5
+}
+```
+
+```json
+{
+  "ok": true,
+  "synced_threads": 12,
+  "messages_inserted": 84,
+  "messages_skipped_duplicate": 31,
+  "pages_fetched": 14,
+  "rate_limited": false
+}
+```
+
+`POST /send`
+
+```json
+{
+  "account_id": 1,
+  "recipient": "urn:li:fsd_profile:123",
+  "text": "Hello",
+  "idempotency_key": "linkedin-dm-2026-04-09-001"
+}
+```
+
+```json
+{
+  "ok": true,
+  "send_id": 7,
+  "platform_message_id": "urn:li:msg:123",
+  "status": "sent",
+  "was_duplicate": false
+}
+```
+
 ## Running the CLI
 
 The CLI uses the same storage and provider stack as the API.
@@ -94,6 +160,11 @@ Useful sync options:
 - `--exhaust-pagination`
 - `--delay-threads SEC`
 - `--delay-pages SEC`
+
+CLI pagination behavior matches the API:
+- default effective behavior is one page per thread
+- `--max-pages-per-thread N` sets an explicit cap
+- `--exhaust-pagination` follows cursors until exhaustion
 
 Useful send option:
 - `--idempotency-key KEY`
@@ -181,7 +252,7 @@ The SQLite database currently contains these tables:
 - `schema_version`
 - `outbound_sends`
 
-Migrations also add message direction constraints and useful indexes.
+Migrations also add message direction constraints, indexes, and the `outbound_sends(account_id, status)` lookup path used by `GET /sends`.
 
 ## Security notes
 

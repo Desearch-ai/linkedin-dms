@@ -142,3 +142,12 @@ Impact:
 Impact:
 - contributors should prefer `README.md`, `docs/features.md`, and `docs/architecture.md` for the current implementation picture
 - the overview file may describe the project at a higher and older level than the code now reflects
+
+## 16. CLI help text can be read as more permissive than the effective default
+
+In `apps/cli/__main__.py`, `--max-pages-per-thread` is declared with `default=None`, but the parser later resolves the effective default to `1` page unless `--exhaust-pagination` is set.
+
+Impact:
+- the runtime behavior is correct and matches the API MVP default
+- contributors reading only the argparse declaration can misread the default behavior
+- docs should call out the effective one-page default explicitly, which this docs pass now does

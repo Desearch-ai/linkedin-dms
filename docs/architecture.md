@@ -80,6 +80,12 @@ Current schema:
 - `schema_version`
 - `outbound_sends`
 
+Schema versioning today:
+- version `0`: baseline tables
+- version `1`: thread/message indexes
+- version `2`: `messages.direction` check constraint (`in` or `out`)
+- version `3`: `outbound_sends` table and account/status index
+
 Key behaviors:
 - initializes SQLite in WAL mode with foreign keys enabled
 - creates baseline tables on first run
@@ -193,6 +199,11 @@ Sending uses a separate POST request path to the messaging conversations endpoin
 - browser-like headers
 - the same account cookies
 - retry and backoff logic for network and rate-limit failures
+
+The persistence path is deliberately durable:
+- `create_or_get_outbound_send()` inserts a pending row before the network call
+- `mark_outbound_sent()` or `mark_outbound_failed()` records the terminal state afterward
+- successful sends are mirrored into `messages` so local history includes outbound content, even though the thread key is currently simplified to the provided recipient identifier
 
 ## Retry and backoff model
 
