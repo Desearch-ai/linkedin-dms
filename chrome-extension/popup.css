@@ -1,7 +1,5 @@
 /* Desearch LinkedIn Bridge — Modern Themed UI */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* ─── Dark Theme (default) ────────────────────────────────────────────────── */
@@ -82,7 +80,7 @@
 
 body {
   width: 380px;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 14px;
   line-height: 1.6;
   color: var(--text-primary);

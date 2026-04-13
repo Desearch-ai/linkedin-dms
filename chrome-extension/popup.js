@@ -26,7 +26,6 @@ async function loadState() {
     lastUpdated: null,
     xLiTrack: null,
     csrfToken: null,
-    liAtValue: null,
   });
 
   backendUrlInput.value = state.serviceUrl;
@@ -44,12 +43,7 @@ async function loadState() {
     statusBadge.className = "status-badge status-disconnected";
   }
 
-  // Cookie preview
-  if (state.liAtValue) {
-    cookieStatusEl.textContent = "..." + state.liAtValue.slice(-8);
-  } else {
-    cookieStatusEl.textContent = "—";
-  }
+  cookieStatusEl.textContent = await getCookieStatus();
 
   // Last updated
   if (state.lastUpdated) {
@@ -72,6 +66,18 @@ async function loadState() {
 
   // Disable sync if no account
   btnSync.disabled = !state.accountId;
+}
+
+async function getCookieStatus() {
+  try {
+    const cookie = await chrome.cookies.get({
+      url: "https://www.linkedin.com",
+      name: "li_at",
+    });
+    return cookie ? "Detected" : "Not detected";
+  } catch {
+    return "Unavailable";
+  }
 }
 
 // ─── Health check ────────────────────────────────────────────────────────────
