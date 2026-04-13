@@ -18,7 +18,7 @@ from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, Syn
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging
 from libs.core.storage import Storage
-from libs.providers.linkedin.provider import LinkedInProvider
+from libs.providers.linkedin.provider import LinkedInProvider, MAX_MESSAGES_PER_PAGE
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=int,
         default=50,
         metavar="N",
-        help="Messages per provider page (default: 50, max: 500)",
+        help=f"Messages per provider page (default: 50, max: {MAX_MESSAGES_PER_PAGE})",
     )
     p_sync.add_argument(
         "--max-pages-per-thread",
@@ -109,8 +109,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     if args.command == "sync":
         if args.exhaust_pagination and args.max_pages_per_thread is not None:
             parser.error("cannot combine --exhaust-pagination with --max-pages-per-thread")
-        if not (1 <= args.limit_per_thread <= 500):
-            parser.error("--limit-per-thread must be between 1 and 500")
+        if not (1 <= args.limit_per_thread <= MAX_MESSAGES_PER_PAGE):
+            parser.error(f"--limit-per-thread must be between 1 and {MAX_MESSAGES_PER_PAGE}")
         max_pages: int | None
         if args.exhaust_pagination:
             max_pages = None

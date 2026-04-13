@@ -11,7 +11,7 @@ from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, Syn
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
-from libs.providers.linkedin.provider import LinkedInProvider
+from libs.providers.linkedin.provider import LinkedInProvider, MAX_MESSAGES_PER_PAGE
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class SendIn(BaseModel):
 
 class SyncIn(BaseModel):
     account_id: int
-    limit_per_thread: int = Field(50, ge=1, le=500, description="Messages per page")
+    limit_per_thread: int = Field(50, ge=1, le=MAX_MESSAGES_PER_PAGE, description="Messages per page")
     max_pages_per_thread: int | None = Field(
         1,
         ge=1,

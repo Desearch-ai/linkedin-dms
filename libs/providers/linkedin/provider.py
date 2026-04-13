@@ -15,6 +15,12 @@ from libs.core.models import AccountAuth, ProxyConfig
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Constants — fetch_messages
+# ---------------------------------------------------------------------------
+
+MAX_MESSAGES_PER_PAGE = 200
+
+# ---------------------------------------------------------------------------
 # Constants — send_message (upstream)
 # ---------------------------------------------------------------------------
 
@@ -669,8 +675,8 @@ class LinkedInProvider:
         Returns:
             (messages, next_cursor).  next_cursor is None when exhausted.
         """
-        if limit < 1 or limit > 200:
-            raise ValueError(f"limit must be between 1 and 200, got {limit}")
+        if limit < 1 or limit > MAX_MESSAGES_PER_PAGE:
+            raise ValueError(f"limit must be between 1 and {MAX_MESSAGES_PER_PAGE}, got {limit}")
 
         headers = self._build_graphql_headers()
         cookies = self._get_browser_cookies()
