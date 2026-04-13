@@ -151,3 +151,15 @@ Impact:
 - the runtime behavior is correct and matches the API MVP default
 - contributors reading only the argparse declaration can misread the default behavior
 - docs should call out the effective one-page default explicitly, which this docs pass now does
+
+## 17. API auth is optional, not mandatory
+
+The local API can now require a bearer token through `DESEARCH_API_TOKEN`, but the protection is opt-in.
+
+Impact:
+- local setups that do not set the token still expose account, sync, send, and thread routes to any local process that can reach the port
+- this keeps zero-config local development simple, but it is not a hardened default for shared or remotely exposed environments
+
+Operational advice:
+- keep the bind address at `127.0.0.1`
+- set `DESEARCH_API_TOKEN` before using any non-localhost binding, reverse proxy, or shared workstation setup

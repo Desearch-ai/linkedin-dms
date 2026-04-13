@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
@@ -21,6 +23,28 @@ app = FastAPI(title="Desearch LinkedIn DMs", version="0.0.2")
 
 storage = Storage()
 storage.migrate()
+
+
+def _get_api_token() -> str | None:
+    value = os.getenv("DESEARCH_API_TOKEN")
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def require_api_auth(authorization: str | None = Header(default=None)) -> None:
+    expected = _get_api_token()
+    if expected is None:
+        return
+
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 class AuthCheckResponse(BaseModel):
@@ -100,7 +124,7 @@ def health():
     return {"ok": True}
 
 
-@app.post("/accounts")
+@app.post("/accounts", dependencies=[Depends(require_api_auth)])
 def create_account(body: AccountCreateIn):
     try:
         auth = body.to_account_auth()
@@ -112,7 +136,7 @@ def create_account(body: AccountCreateIn):
     return {"account_id": account_id}
 
 
-@app.post("/accounts/refresh")
+@app.post("/accounts/refresh", dependencies=[Depends(require_api_auth)])
 def refresh_account(body: AccountRefreshIn):
     """Update session cookies for an existing account without recreating it."""
     try:
@@ -127,7 +151,7 @@ def refresh_account(body: AccountRefreshIn):
     return {"ok": True, "account_id": body.account_id}
 
 
-@app.get("/auth/check", response_model=AuthCheckResponse)
+@app.get("/auth/check", response_model=AuthCheckResponse, dependencies=[Depends(require_api_auth)])
 def auth_check(account_id: int):
     try:
         auth = storage.get_account_auth(account_id)
@@ -144,12 +168,12 @@ def auth_check(account_id: int):
     return {"status": "failed", "error": result.error or "authentication check failed"}
 
 
-@app.get("/threads")
+@app.get("/threads", dependencies=[Depends(require_api_auth)])
 def list_threads(account_id: int):
     return {"threads": storage.list_threads(account_id=account_id)}
 
 
-@app.post("/sync")
+@app.post("/sync", dependencies=[Depends(require_api_auth)])
 def sync_account(body: SyncIn):
     """Trigger a sync. Default one page per thread (MVP); set max_pages_per_thread or null to exhaust."""
     try:
@@ -196,7 +220,7 @@ def sync_account(body: SyncIn):
         ) from None
 
 
-@app.post("/send")
+@app.post("/send", dependencies=[Depends(require_api_auth)])
 def send_message(body: SendIn):
     try:
         auth = storage.get_account_auth(body.account_id)
@@ -236,7 +260,7 @@ def send_message(body: SendIn):
         ) from None
 
 
-@app.get("/sends")
+@app.get("/sends", dependencies=[Depends(require_api_auth)])
 def list_sends(account_id: int, status: str | None = None):
     """Query outbound send records for an account, optionally filtered by status."""
     try:

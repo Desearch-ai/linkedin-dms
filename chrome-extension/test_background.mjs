@@ -279,6 +279,23 @@ async function testAC5_manualSync() {
   }
 }
 
+async function testAC5b_manualSyncIncludesBearerToken() {
+  console.log("\nAC5b: MANUAL_SYNC includes Authorization when apiToken is configured");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.apiToken = "local-api-token";
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, "sync response is ok");
+
+  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
+  assert(!!syncCall, "POST /sync was called");
+  if (syncCall) {
+    assert(syncCall.options.headers.Authorization === "Bearer local-api-token", "Authorization header included");
+  }
+}
+
 async function testAC6_manualRefresh() {
   console.log("\nAC6: MANUAL_REFRESH triggers cookie refresh");
   const env = buildEnv();
@@ -304,6 +321,7 @@ async function main() {
   await testAC3_ignoresNonLinkedIn();
   await testAC4_headerCapture();
   await testAC5_manualSync();
+  await testAC5b_manualSyncIncludesBearerToken();
   await testAC6_manualRefresh();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
