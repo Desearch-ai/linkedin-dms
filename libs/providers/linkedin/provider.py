@@ -451,7 +451,22 @@ class LinkedInProvider:
             resp = client.get(f"{_VOYAGER_BASE}/me", headers=headers, cookies=cookies)
             if resp.status_code == 200:
                 data = resp.json()
-                self._profile_id = data.get("entityUrn") or data.get("publicIdentifier")
+                pid = data.get("entityUrn") or data.get("publicIdentifier")
+
+                # Normalized response: identifiers nested under "data"
+                if not pid:
+                    inner = data.get("data") or {}
+                    pid = inner.get("plainId") or inner.get("*miniProfile")
+
+                # Fallback: scan "included" array for a fsd_profile dashEntityUrn
+                if not pid:
+                    for item in data.get("included") or []:
+                        urn = item.get("dashEntityUrn")
+                        if urn and "fsd_profile" in urn:
+                            pid = urn
+                            break
+
+                self._profile_id = pid
         except Exception:
             logger.debug("_get_profile_id: failed to fetch /me", exc_info=True)
         self._profile_id_fetched = True

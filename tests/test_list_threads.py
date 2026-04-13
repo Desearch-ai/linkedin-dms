@@ -704,6 +704,91 @@ class TestGetProfileId:
             pid = p._get_profile_id()
         assert pid is None
 
+    def test_profile_id_from_nested_plain_id(self, auth):
+        """Normalized response with plainId under 'data' key."""
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {"data": {"plainId": "123456789"}}
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            pid = p._get_profile_id()
+        assert pid == "123456789"
+
+    def test_profile_id_from_nested_mini_profile(self, auth):
+        """Normalized response with *miniProfile URN under 'data' key."""
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {
+            "data": {"*miniProfile": "urn:li:fsd_profile:XYZ789"},
+        }
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            pid = p._get_profile_id()
+        assert pid == "urn:li:fsd_profile:XYZ789"
+
+    def test_profile_id_from_included_dash_entity_urn(self, auth):
+        """Normalized response with dashEntityUrn in the included array."""
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {
+            "included": [
+                {"$type": "com.linkedin.voyager.common.Me"},
+                {
+                    "$type": "com.linkedin.voyager.identity.shared.MiniProfile",
+                    "dashEntityUrn": "urn:li:fsd_profile:DASH_ABC",
+                },
+            ],
+        }
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            pid = p._get_profile_id()
+        assert pid == "urn:li:fsd_profile:DASH_ABC"
+
+    def test_profile_id_top_level_takes_precedence(self, auth):
+        """Top-level entityUrn wins over nested fields."""
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {
+            "entityUrn": "urn:li:fsd_profile:TOP",
+            "data": {"plainId": "999"},
+            "included": [
+                {"dashEntityUrn": "urn:li:fsd_profile:INCLUDED"},
+            ],
+        }
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            pid = p._get_profile_id()
+        assert pid == "urn:li:fsd_profile:TOP"
+
+    def test_profile_id_skips_non_fsd_profile_in_included(self, auth):
+        """included items without fsd_profile in dashEntityUrn are ignored."""
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {
+            "included": [
+                {"dashEntityUrn": "urn:li:fsd_company:CORP123"},
+            ],
+        }
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            pid = p._get_profile_id()
+        assert pid is None
+
 
 # ---------------------------------------------------------------------------
 # JSON decode safety
