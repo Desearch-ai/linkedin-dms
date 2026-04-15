@@ -590,6 +590,12 @@ class LinkedInProvider:
                     client, url, headers=headers, cookies=cookies,
                 )
 
+            if resp.status_code in (302, 303):
+                raise PermissionError(
+                    "LinkedIn redirected to login (HTTP %d). Session expired — re-authenticate."
+                    % resp.status_code
+                )
+
             resp.raise_for_status()
             try:
                 data = resp.json() if resp.content else {}
@@ -695,6 +701,12 @@ class LinkedInProvider:
             cookies = self._harvest_and_cache_cookies()
             resp = self._get_with_retry(
                 client, url, headers=headers, cookies=cookies,
+            )
+
+        if resp.status_code in (302, 303):
+            raise PermissionError(
+                "LinkedIn redirected to login (HTTP %d). Session expired — re-authenticate."
+                % resp.status_code
             )
 
         resp.raise_for_status()

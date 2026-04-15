@@ -99,6 +99,11 @@ class SyncIn(BaseModel):
 def _map_provider_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
     """Map an upstream LinkedIn HTTP error to a stable API response."""
     status = exc.response.status_code
+    if status in (301, 302, 303, 307, 308):
+        return HTTPException(
+            status_code=401,
+            detail="LinkedIn redirected to login — session expired, re-authenticate via POST /accounts/refresh",
+        )
     if status in (401, 403):
         return HTTPException(
             status_code=401,
