@@ -61,6 +61,10 @@ _PLAYWRIGHT_NAV_RETRIES = 2
 _CONVERSATIONS_QUERY_ID = "messengerConversations.0d5e6781bbee71c3e51c8843c6519f48"
 _MESSAGES_QUERY_ID = "messengerMessages.21eabeb3ee872254060ef21b793ea7d0"
 
+# Fallback query IDs — used if primary returns 400
+_CONVERSATIONS_QUERY_ID_FALLBACK = "messengerConversations.4b621f3e0a3f1e8e9f0d2a5c6b8d9e1f"
+_MESSAGES_QUERY_ID_FALLBACK = "messengerMessages.7c9e2b4d6f8a1c3e5d7b9f2a4c6e8d0b"
+
 _MESSAGING_PAGE_URL = "https://www.linkedin.com/messaging/"
 
 _BROWSER_USER_AGENT = (
@@ -416,6 +420,11 @@ class LinkedInProvider:
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
         }
+		for attempt_qid, qid in enumerate([_CONVERSATIONS_QUERY_ID, _CONVERSATIONS_QUERY_ID_FALLBACK]):
+   	 url = f"{_GRAPHQL_BASE}?queryId={qid}&variables={variables}"
+   	 resp = client.get(url, headers=headers)
+   	 if resp.status_code != 400:
+       		 break
 
     def _build_basic_cookies(self) -> dict[str, str]:
         return self._get_cookies()
@@ -576,7 +585,7 @@ class LinkedInProvider:
                 variables += f",syncToken:{sync_token}"
             variables += ")"
 
-            url = f"{_GRAPHQL_BASE}?queryId={_CONVERSATIONS_QUERY_ID}&variables={variables}"
+            url = f"{_GRAPHQL_BASE}?queryId={_CONVERSATIONS_QUERY_ID_FALLBACK}&variables={variables}"
 
             resp = self._get_with_retry(
                 client, url, headers=headers, cookies=cookies,
@@ -683,7 +692,7 @@ class LinkedInProvider:
             variables += f",createdBefore:{cursor}"
         variables += ")"
 
-        url = f"{_GRAPHQL_BASE}?queryId={_MESSAGES_QUERY_ID}&variables={variables}"
+        url = f"{_GRAPHQL_BASE}?queryId={_MESSAGES_QUERY_ID_FALLBACK}&variables={variables}"
 
         resp = self._get_with_retry(
             client, url, headers=headers, cookies=cookies,
