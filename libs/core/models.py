@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Optional
-from pydantic import BaseModel
+
 
 @dataclass(frozen=True)
 class ProxyConfig:
@@ -70,19 +70,3 @@ class Message:
     text: Optional[str]
     sent_at: datetime
     raw: Optional[dict[str, Any]] = None
-
-class BrowserHeaders(BaseModel):
-    """Real browser request headers captured by the Chrome extension.
-
-    When provided, the LinkedIn provider uses these values in place of
-    the hardcoded synthetic equivalents, so the backend request fingerprint
-    matches the real browser session and LinkedIn does not challenge/invalidate it.
-
-    All fields are optional — missing fields fall back to the provider defaults.
-    """
-    user_agent: str | None = None
-    x_li_track: str | None = None
-    csrf_token: str | None = None
-    x_li_page_instance: str | None = None
-    x_li_lang: str | None = None
-
