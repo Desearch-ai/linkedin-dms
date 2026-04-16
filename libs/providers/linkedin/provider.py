@@ -420,11 +420,7 @@ class LinkedInProvider:
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
         }
-		for attempt_qid, qid in enumerate([_CONVERSATIONS_QUERY_ID, _CONVERSATIONS_QUERY_ID_FALLBACK]):
-   	 url = f"{_GRAPHQL_BASE}?queryId={qid}&variables={variables}"
-   	 resp = client.get(url, headers=headers)
-   	 if resp.status_code != 400:
-       		 break
+
 
     def _build_basic_cookies(self) -> dict[str, str]:
         return self._get_cookies()
@@ -584,12 +580,12 @@ class LinkedInProvider:
             if sync_token:
                 variables += f",syncToken:{sync_token}"
             variables += ")"
+url = f"{_GRAPHQL_BASE}?queryId={_CONVERSATIONS_QUERY_ID}&variables={variables}"
+resp = self._get_with_retry(client, url, headers=headers, cookies=cookies)
+if resp.status_code == 400:
+    url = f"{_GRAPHQL_BASE}?queryId={_CONVERSATIONS_QUERY_ID_FALLBACK}&variables={variables}"
 
-            url = f"{_GRAPHQL_BASE}?queryId={_CONVERSATIONS_QUERY_ID_FALLBACK}&variables={variables}"
-
-            resp = self._get_with_retry(
-                client, url, headers=headers, cookies=cookies,
-            )
+resp = self._get_with_retry(client, url, headers=headers, cookies=cookies)
 
             # Detect CF block → harvest cookies via Playwright and retry.
             if self._is_cf_blocked(resp) and self._browser_cookies is None:
@@ -691,12 +687,12 @@ class LinkedInProvider:
         if cursor:
             variables += f",createdBefore:{cursor}"
         variables += ")"
+url = f"{_GRAPHQL_BASE}?queryId={_MESSAGES_QUERY_ID}&variables={variables}"
+resp = self._get_with_retry(client, url, headers=headers, cookies=cookies)
+if resp.status_code == 400:
+    url = f"{_GRAPHQL_BASE}?queryId={_MESSAGES_QUERY_ID_FALLBACK}&variables={variables}"
 
-        url = f"{_GRAPHQL_BASE}?queryId={_MESSAGES_QUERY_ID_FALLBACK}&variables={variables}"
-
-        resp = self._get_with_retry(
-            client, url, headers=headers, cookies=cookies,
-        )
+resp = self._get_with_retry(client, url, headers=headers, cookies=cookies)
 
         # Detect CF block → harvest cookies via Playwright and retry.
         if self._is_cf_blocked(resp) and self._browser_cookies is None:
