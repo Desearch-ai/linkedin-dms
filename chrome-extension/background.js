@@ -118,13 +118,23 @@ async function registerAccount(config, cookies) {
 // csrf-token header values from the real browser session.
 
 chrome.webRequest.onSendHeaders.addListener(
-  (details) => {
-    const track = details.requestHeaders.find(h => h.name === "x-li-track");
-    const csrf = details.requestHeaders.find(h => h.name === "csrf-token");
-    if (track || csrf) {
-      // store for provider use
-      chrome.storage.local.set({ xLiTrack: track?.value, csrfToken: csrf?.value });
-    }
+  async (details) => {
+    const headers = details.requestHeaders || [];
+    const track = headers.find((h) => (h.name || "").toLowerCase() === "x-li-track");
+    const csrf = headers.find((h) => (h.name || "").toLowerCase() === "csrf-token");
+
+    if (!track && !csrf) return;
+
+    // Preserve previously captured value when only one header is present.
+    const current = await chrome.storage.local.get({ xLiTrack: null, csrfToken: null });
+    const updates = {
+      xLiTrack: track?.value ?? current.xLiTrack,
+      csrfToken: csrf?.value ?? current.csrfToken,
+      headersUpdatedAt: new Date().toISOString(),
+    };
+
+    // store for provider use
+    chrome.storage.local.set(updates);
   },
   { urls: [VOYAGER_API_PATTERN] },
   ["requestHeaders"]

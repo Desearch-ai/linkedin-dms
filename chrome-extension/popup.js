@@ -22,6 +22,7 @@ async function loadState() {
     lastUpdated: null,
     xLiTrack: null,
     csrfToken: null,
+    headersUpdatedAt: null,
   });
 
   backendUrlInput.value = state.serviceUrl;
