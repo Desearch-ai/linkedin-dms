@@ -204,10 +204,10 @@ def sync_account(body: SyncIn):
             "rate_limited": result.rate_limited,
         }
     except PermissionError as exc:
-        raise HTTPException(
-            status_code=401,
-            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
-        ) from exc
+        detail = redact_string(str(exc)).strip() if str(exc) else "LinkedIn authentication failed."
+        if "POST /accounts/refresh" not in detail:
+            detail = f"{detail} re-authenticate via POST /accounts/refresh"
+        raise HTTPException(status_code=401, detail=detail) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
@@ -249,10 +249,10 @@ def send_message(body: SendIn):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except PermissionError as exc:
-        raise HTTPException(
-            status_code=401,
-            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
-        ) from exc
+        detail = redact_string(str(exc)).strip() if str(exc) else "LinkedIn authentication failed."
+        if "POST /accounts/refresh" not in detail:
+            detail = f"{detail} re-authenticate via POST /accounts/refresh"
+        raise HTTPException(status_code=401, detail=detail) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
