@@ -11,9 +11,19 @@ const SERVICE_URL_DEFAULT = "http://localhost:8899";
 async function getConfig() {
   const result = await chrome.storage.local.get({
     serviceUrl: SERVICE_URL_DEFAULT,
+    apiToken: "",
     accountId: null,
   });
   return result;
+}
+
+function buildServiceHeaders(config) {
+  const headers = { "Content-Type": "application/json" };
+  const token = (config.apiToken || "").trim();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 async function setStatus(status, error = null) {
@@ -76,7 +86,7 @@ async function pushRefresh(config, cookies) {
 
   const resp = await fetch(`${config.serviceUrl}/accounts/refresh`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServiceHeaders(config),
     body: JSON.stringify(payload),
   });
 
@@ -98,7 +108,7 @@ async function registerAccount(config, cookies) {
 
   const resp = await fetch(`${config.serviceUrl}/accounts`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServiceHeaders(config),
     body: JSON.stringify(payload),
   });
 
@@ -156,7 +166,7 @@ async function handleManualSync() {
 
   const resp = await fetch(`${config.serviceUrl}/sync`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServiceHeaders(config),
     body: JSON.stringify({ account_id: config.accountId }),
   });
 
