@@ -60,6 +60,18 @@ export DESEARCH_ENCRYPTION_KEY="$(python -c "from cryptography.fernet import Fer
 
 If `DESEARCH_ENCRYPTION_KEY` is not set, the app still works, but auth and proxy JSON are stored in plaintext and the process logs a one-time warning.
 
+Optional local API bearer auth:
+
+```bash
+export DESEARCH_API_TOKEN='replace-with-a-local-shared-secret'
+```
+
+If `DESEARCH_API_TOKEN` is set, all routes except `GET /health` require:
+
+```bash
+Authorization: Bearer <token>
+```
+
 ## Running the API
 
 ```bash
@@ -77,6 +89,11 @@ Useful endpoints:
 - `GET /sends?account_id=1`
 
 Swagger UI is available at <http://127.0.0.1:8899/docs>.
+
+Security posture for local development:
+- bind to `127.0.0.1`, not `0.0.0.0`
+- set `DESEARCH_API_TOKEN` if other local processes should not be able to drive the API
+- configure the same bearer token in the Chrome extension popup when API auth is enabled
 
 ### API request and response shape
 
@@ -180,12 +197,14 @@ Examples:
 ```bash
 curl -s -X POST http://127.0.0.1:8899/accounts \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer replace-with-a-local-shared-secret' \
   -d '{"label":"sales-1","li_at":"REDACTED","jsessionid":"ajax:REDACTED"}'
 ```
 
 ```bash
 curl -s -X POST http://127.0.0.1:8899/accounts \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer replace-with-a-local-shared-secret' \
   -d '{"label":"sales-1","cookies":"li_at=REDACTED; JSESSIONID=ajax:REDACTED"}'
 ```
 
@@ -194,6 +213,7 @@ Refresh an existing account without recreating it:
 ```bash
 curl -s -X POST http://127.0.0.1:8899/accounts/refresh \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer replace-with-a-local-shared-secret' \
   -d '{"account_id":1,"cookies":"li_at=REDACTED; JSESSIONID=ajax:REDACTED"}'
 ```
 

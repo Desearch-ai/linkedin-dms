@@ -6,6 +6,7 @@ const accountIdEl = document.getElementById("accountId");
 const lastUpdatedEl = document.getElementById("lastUpdated");
 const headersStatusEl = document.getElementById("headersStatus");
 const backendUrlInput = document.getElementById("backendUrl");
+const apiTokenInput = document.getElementById("apiToken");
 const resultEl = document.getElementById("result");
 const btnSync = document.getElementById("btnSync");
 const btnRefresh = document.getElementById("btnRefresh");
@@ -16,15 +17,18 @@ const btnSaveConfig = document.getElementById("btnSaveConfig");
 async function loadState() {
   const state = await chrome.storage.local.get({
     serviceUrl: "http://localhost:8899",
+    apiToken: "",
     accountId: null,
     lastStatus: null,
     lastError: null,
     lastUpdated: null,
     xLiTrack: null,
     csrfToken: null,
+    headersUpdatedAt: null,
   });
 
   backendUrlInput.value = state.serviceUrl;
+  apiTokenInput.value = state.apiToken;
   accountIdEl.textContent = state.accountId ?? "—";
 
   // Status indicator
@@ -73,11 +77,12 @@ function setButtonsDisabled(disabled) {
 
 btnSaveConfig.addEventListener("click", async () => {
   const url = backendUrlInput.value.trim().replace(/\/+$/, "");
+  const apiToken = apiTokenInput.value.trim();
   if (!url) {
     showResult("Backend URL is required.", true);
     return;
   }
-  await chrome.storage.local.set({ serviceUrl: url });
+  await chrome.storage.local.set({ serviceUrl: url, apiToken });
   showResult("Config saved.");
 });
 

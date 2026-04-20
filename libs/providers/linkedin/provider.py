@@ -15,6 +15,12 @@ from libs.core.models import AccountAuth, ProxyConfig
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Constants — fetch_messages
+# ---------------------------------------------------------------------------
+
+MAX_MESSAGES_PER_PAGE = 200
+
+# ---------------------------------------------------------------------------
 # Constants — send_message (upstream)
 # ---------------------------------------------------------------------------
 
@@ -451,7 +457,22 @@ class LinkedInProvider:
             resp = client.get(f"{_VOYAGER_BASE}/me", headers=headers, cookies=cookies)
             if resp.status_code == 200:
                 data = resp.json()
-                self._profile_id = data.get("entityUrn") or data.get("publicIdentifier")
+                pid = data.get("entityUrn") or data.get("publicIdentifier")
+
+                # Normalized response: identifiers nested under "data"
+                if not pid:
+                    inner = data.get("data") or {}
+                    pid = inner.get("plainId") or inner.get("*miniProfile")
+
+                # Fallback: scan "included" array for a fsd_profile dashEntityUrn
+                if not pid:
+                    for item in data.get("included") or []:
+                        urn = item.get("dashEntityUrn")
+                        if urn and "fsd_profile" in urn:
+                            pid = urn
+                            break
+
+                self._profile_id = pid
         except Exception:
             logger.debug("_get_profile_id: failed to fetch /me", exc_info=True)
         self._profile_id_fetched = True
@@ -675,8 +696,8 @@ class LinkedInProvider:
         Returns:
             (messages, next_cursor).  next_cursor is None when exhausted.
         """
-        if limit < 1 or limit > 200:
-            raise ValueError(f"limit must be between 1 and 200, got {limit}")
+        if limit < 1 or limit > MAX_MESSAGES_PER_PAGE:
+            raise ValueError(f"limit must be between 1 and {MAX_MESSAGES_PER_PAGE}, got {limit}")
 
         headers = self._build_graphql_headers()
         cookies = self._get_browser_cookies()

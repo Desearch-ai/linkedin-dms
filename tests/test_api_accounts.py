@@ -16,12 +16,14 @@ def _clean_env(monkeypatch, tmp_path):
     """Use a temp DB and reset crypto warning flag."""
     monkeypatch.setenv("DESEARCH_DB_PATH", str(tmp_path / "test.sqlite"))
     monkeypatch.delenv("DESEARCH_ENCRYPTION_KEY", raising=False)
+    monkeypatch.delenv("DESEARCH_API_TOKEN", raising=False)
     crypto._warned_no_key = False
 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DESEARCH_DB_PATH", str(tmp_path / "test.sqlite"))
+    monkeypatch.delenv("DESEARCH_API_TOKEN", raising=False)
     # Re-import to pick up fresh Storage with tmp db
     # We patch Storage init to use tmp_path
     from libs.core.storage import Storage
@@ -99,3 +101,24 @@ class TestCreateAccountValidation:
     def test_empty_li_at_rejected(self, client):
         resp = client.post("/accounts", json={"label": "test", "li_at": ""})
         assert resp.status_code == 422
+
+
+class TestCreateAccountApiAuth:
+    def test_create_requires_bearer_token_when_configured(self, client, monkeypatch):
+        monkeypatch.setenv("DESEARCH_API_TOKEN", "secret-token")
+        resp = client.post(
+            "/accounts",
+            json={"label": "test", "li_at": "AQEDAWx0Y29va2llXXX"},
+        )
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Missing or invalid bearer token"
+
+    def test_create_accepts_bearer_token_when_configured(self, client, monkeypatch):
+        monkeypatch.setenv("DESEARCH_API_TOKEN", "secret-token")
+        resp = client.post(
+            "/accounts",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"label": "test", "li_at": "AQEDAWx0Y29va2llXXX"},
+        )
+        assert resp.status_code == 200
+        assert "account_id" in resp.json()

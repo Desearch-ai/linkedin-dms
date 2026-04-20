@@ -34,6 +34,10 @@ class TestParseCookieString:
         result = parse_cookie_string('li_at="abc123defg"')
         assert result == {"li_at": "abc123defg"}
 
+    def test_quoted_jsessionid(self):
+        result = parse_cookie_string('li_at=abc123defg; JSESSIONID="ajax:token123"')
+        assert result == {"li_at": "abc123defg", "JSESSIONID": "ajax:token123"}
+
     def test_ignores_unknown_cookies(self):
         result = parse_cookie_string("li_at=abc123defg; _ga=GA1.2.123; JSESSIONID=tok")
         assert result == {"li_at": "abc123defg", "JSESSIONID": "tok"}
@@ -86,6 +90,12 @@ class TestCookiesToAccountAuth:
         assert auth.li_at == "AQEDAWx0Y29va2ll"
         assert auth.jsessionid == "ajax:tok123"
 
+    def test_from_json_array_quoted_jsessionid(self):
+        json_input = '[{"name": "li_at", "value": "AQEDAWx0Y29va2ll"}, {"name": "JSESSIONID", "value": "\\"ajax:tok123\\""}]'
+        auth = cookies_to_account_auth(json_input)
+        assert auth.li_at == "AQEDAWx0Y29va2ll"
+        assert auth.jsessionid == "ajax:tok123"
+
     def test_missing_li_at_raises(self):
         with pytest.raises(ValueError, match="li_at"):
             cookies_to_account_auth("JSESSIONID=ajax:tok123")
@@ -123,6 +133,22 @@ class TestParseCookieJson:
         data = [{"name": "li_at"}]
         assert parse_cookie_json(data) == {}
 
+    def test_strips_quoted_jsessionid(self):
+        data = [
+            {"name": "li_at", "value": "abc123defg"},
+            {"name": "JSESSIONID", "value": '"ajax:tok123"'},
+        ]
+        result = parse_cookie_json(data)
+        assert result == {"li_at": "abc123defg", "JSESSIONID": "ajax:tok123"}
+
+    def test_unquoted_jsessionid_unchanged(self):
+        data = [
+            {"name": "li_at", "value": "abc123defg"},
+            {"name": "JSESSIONID", "value": "ajax:tok123"},
+        ]
+        result = parse_cookie_json(data)
+        assert result == {"li_at": "abc123defg", "JSESSIONID": "ajax:tok123"}
+
 
 class TestDetectAndParseCookies:
     def test_detects_header_string(self):
@@ -142,3 +168,12 @@ class TestDetectAndParseCookies:
         json_str = '  [{"name": "li_at", "value": "abc123defg"}]  '
         result = detect_and_parse_cookies(json_str)
         assert result == {"li_at": "abc123defg"}
+
+    def test_json_quoted_jsessionid(self):
+        json_str = '[{"name": "li_at", "value": "abc123defg"}, {"name": "JSESSIONID", "value": "\\"ajax:tok\\""}]'
+        result = detect_and_parse_cookies(json_str)
+        assert result == {"li_at": "abc123defg", "JSESSIONID": "ajax:tok"}
+
+    def test_header_quoted_jsessionid(self):
+        result = detect_and_parse_cookies('li_at=abc123defg; JSESSIONID="ajax:tok"')
+        assert result == {"li_at": "abc123defg", "JSESSIONID": "ajax:tok"}

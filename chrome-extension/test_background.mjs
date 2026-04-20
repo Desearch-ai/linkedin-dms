@@ -248,7 +248,7 @@ async function testAC4_headerCapture() {
   assert(headerListener.filter.urls[0] === "https://www.linkedin.com/voyager/api/*", "filter matches voyager API pattern");
 
   // Simulate a request with both headers
-  headerListener.fn({
+  await headerListener.fn({
     requestHeaders: [
       { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
       { name: "csrf-token", value: "ajax:abc123" },
@@ -258,6 +258,17 @@ async function testAC4_headerCapture() {
 
   assert(env.storage.xLiTrack === '{"clientVersion":"1.13.42912"}', "xLiTrack stored");
   assert(env.storage.csrfToken === "ajax:abc123", "csrfToken stored");
+  assert(!!env.storage.headersUpdatedAt, "headersUpdatedAt stored");
+
+  // Simulate partial update: only one header present (case-insensitive name)
+  await headerListener.fn({
+    requestHeaders: [
+      { name: "X-LI-TRACK", value: '{"clientVersion":"1.13.42913"}' },
+    ],
+  });
+
+  assert(env.storage.xLiTrack === '{"clientVersion":"1.13.42913"}', "xLiTrack updates on partial capture");
+  assert(env.storage.csrfToken === "ajax:abc123", "csrfToken preserved when not present in later request");
 }
 
 async function testAC5_manualSync() {
@@ -276,6 +287,23 @@ async function testAC5_manualSync() {
   if (syncCall) {
     const body = JSON.parse(syncCall.options.body);
     assert(body.account_id === 1, "account_id passed to sync");
+  }
+}
+
+async function testAC5b_manualSyncIncludesBearerToken() {
+  console.log("\nAC5b: MANUAL_SYNC includes Authorization when apiToken is configured");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.apiToken = "local-api-token";
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, "sync response is ok");
+
+  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
+  assert(!!syncCall, "POST /sync was called");
+  if (syncCall) {
+    assert(syncCall.options.headers.Authorization === "Bearer local-api-token", "Authorization header included");
   }
 }
 
@@ -304,6 +332,7 @@ async function main() {
   await testAC3_ignoresNonLinkedIn();
   await testAC4_headerCapture();
   await testAC5_manualSync();
+  await testAC5b_manualSyncIncludesBearerToken();
   await testAC6_manualRefresh();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

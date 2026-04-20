@@ -21,6 +21,14 @@ class ProxyConfig:
         return self.__repr__()
 
 
+def _normalize_jsessionid(value: Optional[str]) -> Optional[str]:
+    """Strip surrounding quotes that LinkedIn adds to JSESSIONID cookie values."""
+    if value is None:
+        return None
+    stripped = value.strip().strip('"')
+    return stripped if stripped else None
+
+
 @dataclass(frozen=True)
 class AccountAuth:
     """LinkedIn auth material.
@@ -35,6 +43,10 @@ class AccountAuth:
 
     li_at: str
     jsessionid: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        # Normalize quoted JSESSIONID regardless of which input path created this instance.
+        object.__setattr__(self, "jsessionid", _normalize_jsessionid(self.jsessionid))
 
     def __repr__(self) -> str:
         return "AccountAuth(li_at='[REDACTED]', jsessionid='[REDACTED]')"

@@ -51,7 +51,7 @@ def parse_cookie_json(cookie_data: list[dict[str, Any]]) -> dict[str, str]:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name", "")).strip()
-        value = str(entry.get("value", "")).strip()
+        value = str(entry.get("value", "")).strip().strip('"')
         normalized = _KNOWN_KEYS.get(name.lower())
         if normalized and value:
             result[normalized] = value

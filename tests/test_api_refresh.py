@@ -16,12 +16,14 @@ def _clean_env(monkeypatch, tmp_path):
     """Use a temp DB and reset crypto warning flag."""
     monkeypatch.setenv("DESEARCH_DB_PATH", str(tmp_path / "test.sqlite"))
     monkeypatch.delenv("DESEARCH_ENCRYPTION_KEY", raising=False)
+    monkeypatch.delenv("DESEARCH_API_TOKEN", raising=False)
     crypto._warned_no_key = False
 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DESEARCH_DB_PATH", str(tmp_path / "test.sqlite"))
+    monkeypatch.delenv("DESEARCH_API_TOKEN", raising=False)
     from libs.core.storage import Storage
 
     storage = Storage(db_path=tmp_path / "test.sqlite")

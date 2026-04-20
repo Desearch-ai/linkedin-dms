@@ -11,9 +11,19 @@ const SERVICE_URL_DEFAULT = "http://localhost:8899";
 async function getConfig() {
   const result = await chrome.storage.local.get({
     serviceUrl: SERVICE_URL_DEFAULT,
+    apiToken: "",
     accountId: null,
   });
   return result;
+}
+
+function buildServiceHeaders(config) {
+  const headers = { "Content-Type": "application/json" };
+  const token = (config.apiToken || "").trim();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 async function setStatus(status, error = null) {
@@ -76,7 +86,7 @@ async function pushRefresh(config, cookies) {
 
   const resp = await fetch(`${config.serviceUrl}/accounts/refresh`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServiceHeaders(config),
     body: JSON.stringify(payload),
   });
 
@@ -98,7 +108,7 @@ async function registerAccount(config, cookies) {
 
   const resp = await fetch(`${config.serviceUrl}/accounts`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServiceHeaders(config),
     body: JSON.stringify(payload),
   });
 
@@ -118,13 +128,23 @@ async function registerAccount(config, cookies) {
 // csrf-token header values from the real browser session.
 
 chrome.webRequest.onSendHeaders.addListener(
-  (details) => {
-    const track = details.requestHeaders.find(h => h.name === "x-li-track");
-    const csrf = details.requestHeaders.find(h => h.name === "csrf-token");
-    if (track || csrf) {
-      // store for provider use
-      chrome.storage.local.set({ xLiTrack: track?.value, csrfToken: csrf?.value });
-    }
+  async (details) => {
+    const headers = details.requestHeaders || [];
+    const track = headers.find((h) => (h.name || "").toLowerCase() === "x-li-track");
+    const csrf = headers.find((h) => (h.name || "").toLowerCase() === "csrf-token");
+
+    if (!track && !csrf) return;
+
+    // Preserve previously captured value when only one header is present.
+    const current = await chrome.storage.local.get({ xLiTrack: null, csrfToken: null });
+    const updates = {
+      xLiTrack: track?.value ?? current.xLiTrack,
+      csrfToken: csrf?.value ?? current.csrfToken,
+      headersUpdatedAt: new Date().toISOString(),
+    };
+
+    // store for provider use
+    chrome.storage.local.set(updates);
   },
   { urls: [VOYAGER_API_PATTERN] },
   ["requestHeaders"]
@@ -156,7 +176,7 @@ async function handleManualSync() {
 
   const resp = await fetch(`${config.serviceUrl}/sync`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServiceHeaders(config),
     body: JSON.stringify({ account_id: config.accountId }),
   });
 
