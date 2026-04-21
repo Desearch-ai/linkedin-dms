@@ -166,15 +166,31 @@ def create_account(body: AccountCreateIn):
 
 @app.post("/accounts/refresh", dependencies=[Depends(require_api_auth)])
 def refresh_account(body: AccountRefreshIn):
-    """Update session cookies for an existing account without recreating it."""
+    """Update session cookies for an existing account without recreating it.
+
+    Preserves previously persisted browser-context headers (``x_li_track`` /
+    ``csrf_token``) when the refresh payload does not supply fresh values,
+    so callers that only rotate cookies don't wipe the persisted fallback
+    this account relies on (issue #54).
+    """
     try:
         auth = body.to_account_auth()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=redact_string(str(exc)))
     try:
-        storage.update_account_auth(body.account_id, auth)
+        existing = storage.get_account_auth(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
+
+    preserved: dict[str, str] = {}
+    if auth.x_li_track is None and existing.x_li_track:
+        preserved["x_li_track"] = existing.x_li_track
+    if auth.csrf_token is None and existing.csrf_token:
+        preserved["csrf_token"] = existing.csrf_token
+    if preserved:
+        auth = replace(auth, **preserved)
+
+    storage.update_account_auth(body.account_id, auth)
     logger.info("Account refreshed: %s", redact_for_log({"account_id": body.account_id}))
     return {"ok": True, "account_id": body.account_id}
 

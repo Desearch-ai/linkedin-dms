@@ -333,6 +333,95 @@ class TestApiCreateAndRefresh:
         assert got.x_li_track == "FRESH_TRACK"
         assert got.csrf_token == "FRESH_CSRF"
 
+    def test_refresh_without_headers_preserves_stored_headers(self, client):
+        """Reviewer regression (#57): rotating only cookies must not wipe the
+        previously persisted browser-context headers that this PR introduces
+        as a fallback.
+        """
+        aid = client.post(
+            "/accounts",
+            json={
+                "label": "t",
+                "li_at": "AQEDAWx0Y29va2llXXX",
+                "x_li_track": "STORED_TRACK",
+                "csrf_token": "STORED_CSRF",
+            },
+        ).json()["account_id"]
+
+        resp = client.post(
+            "/accounts/refresh",
+            json={"account_id": aid, "li_at": "AQEDAWx0Y29va2llNEW"},
+        )
+        assert resp.status_code == 200
+
+        import apps.api.main as api_mod
+        got = api_mod.storage.get_account_auth(aid)
+        assert got.li_at == "AQEDAWx0Y29va2llNEW"
+        assert got.x_li_track == "STORED_TRACK"
+        assert got.csrf_token == "STORED_CSRF"
+
+    def test_refresh_partial_headers_preserves_the_other(self, client):
+        """Supplying only one captured header must not wipe the other."""
+        aid = client.post(
+            "/accounts",
+            json={
+                "label": "t",
+                "li_at": "AQEDAWx0Y29va2llXXX",
+                "x_li_track": "STORED_TRACK",
+                "csrf_token": "STORED_CSRF",
+            },
+        ).json()["account_id"]
+
+        resp = client.post(
+            "/accounts/refresh",
+            json={
+                "account_id": aid,
+                "li_at": "AQEDAWx0Y29va2llNEW",
+                "csrf_token": "FRESH_CSRF",
+            },
+        )
+        assert resp.status_code == 200
+
+        import apps.api.main as api_mod
+        got = api_mod.storage.get_account_auth(aid)
+        assert got.x_li_track == "STORED_TRACK"
+        assert got.csrf_token == "FRESH_CSRF"
+
+    def test_refresh_blank_headers_treated_as_missing(self, client):
+        """Whitespace-only captures normalize to None and must not clobber."""
+        aid = client.post(
+            "/accounts",
+            json={
+                "label": "t",
+                "li_at": "AQEDAWx0Y29va2llXXX",
+                "x_li_track": "STORED_TRACK",
+                "csrf_token": "STORED_CSRF",
+            },
+        ).json()["account_id"]
+
+        resp = client.post(
+            "/accounts/refresh",
+            json={
+                "account_id": aid,
+                "li_at": "AQEDAWx0Y29va2llNEW",
+                "x_li_track": "   ",
+                "csrf_token": "",
+            },
+        )
+        assert resp.status_code == 200
+
+        import apps.api.main as api_mod
+        got = api_mod.storage.get_account_auth(aid)
+        assert got.x_li_track == "STORED_TRACK"
+        assert got.csrf_token == "STORED_CSRF"
+
+    def test_refresh_unknown_account_returns_404(self, client):
+        resp = client.post(
+            "/accounts/refresh",
+            json={"account_id": 9999, "li_at": "AQEDAWx0Y29va2llXXX"},
+        )
+        assert resp.status_code == 404
+
     def test_cookies_path_also_accepts_headers(self, client):
         """Verify the cookies-string branch of to_account_auth() merges context."""
         resp = client.post(
