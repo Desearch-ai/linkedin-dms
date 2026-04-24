@@ -204,9 +204,12 @@ def sync_account(body: SyncIn):
             "rate_limited": result.rate_limited,
         }
     except PermissionError as exc:
+        detail = redact_string(str(exc))
+        if "POST /accounts/refresh" not in detail:
+            detail = "LinkedIn session expired — re-authenticate via POST /accounts/refresh"
         raise HTTPException(
             status_code=401,
-            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
+            detail=detail,
         ) from exc
     except NotImplementedError:
         raise HTTPException(

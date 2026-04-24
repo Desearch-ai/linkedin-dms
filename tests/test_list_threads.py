@@ -513,19 +513,20 @@ class TestListThreads:
         url = mock_client.get.call_args[0][0]
         assert "mailboxUrn:urn:li:fsd_profile:ABC123" in url
 
-    def test_raises_if_profile_id_unavailable(self, auth):
-        """Raises RuntimeError if profile ID cannot be determined."""
+    def test_raises_actionable_bootstrap_error_if_profile_id_unavailable(self, auth):
+        """Redirected /me bootstrap should surface a refreshable session error."""
         p = LinkedInProvider(auth=auth)
         p._browser_cookies = {"li_at": "x"}
         p._profile_id = None
         mock_client = MagicMock()
         mock_client.is_closed = False
-        # Mock the /me call to return non-200
         me_resp = MagicMock()
         me_resp.status_code = 302
+        me_resp.headers = {"location": "https://www.linkedin.com/login"}
+        me_resp.content = b""
         mock_client.get.return_value = me_resp
         with _patch_client(mock_client):
-            with pytest.raises(RuntimeError, match="profile ID"):
+            with pytest.raises(PermissionError, match=r"POST /accounts/refresh"):
                 p.list_threads()
 
 
@@ -668,19 +669,42 @@ class TestGetProfileId:
         # Only one HTTP call — second was cached
         assert mock_client.get.call_count == 1
 
-    def test_profile_id_none_cached_when_api_fails(self, auth):
-        """If /me fails, we cache None and don't retry every call."""
+    def test_profile_id_redirect_raises_permission_error_and_caches_failure(self, auth):
+        """Redirected /me bootstrap should stay explicit, not degrade into cached None."""
         p = LinkedInProvider(auth=auth)
         mock_client = MagicMock()
         mock_client.is_closed = False
         me_resp = MagicMock()
-        me_resp.status_code = 403
+        me_resp.status_code = 302
+        me_resp.headers = {"location": "https://www.linkedin.com/login"}
+        me_resp.content = b""
         mock_client.get.return_value = me_resp
         with _patch_client(mock_client):
-            first = p._get_profile_id()
-            second = p._get_profile_id()
-        assert first is None
-        assert second is None
+            with pytest.raises(PermissionError, match=r"/voyager/api/me"):
+                p._get_profile_id()
+            with pytest.raises(PermissionError, match=r"POST /accounts/refresh"):
+                p._get_profile_id()
+        assert p._profile_id is None
+        assert mock_client.get.call_count == 1
+
+    def test_profile_id_html_bootstrap_error_is_cached_explicitly(self, auth):
+        """Blocked HTML /me bootstrap should raise an actionable error, not cached None."""
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.headers = {"content-type": "text/html; charset=utf-8"}
+        me_resp.content = b"<html>Please sign in</html>"
+        me_resp.text = "<html>Please sign in</html>"
+        me_resp.json.side_effect = ValueError("not json")
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            with pytest.raises(RuntimeError, match=r"/voyager/api/me"):
+                p._get_profile_id()
+            with pytest.raises(RuntimeError, match=r"POST /accounts/refresh"):
+                p._get_profile_id()
+        assert p._profile_id is None
         assert mock_client.get.call_count == 1
 
     def test_profile_id_from_public_identifier(self, auth):
@@ -695,14 +719,14 @@ class TestGetProfileId:
             pid = p._get_profile_id()
         assert pid == "john-doe"
 
-    def test_profile_id_exception_returns_none(self, auth):
+    def test_profile_id_network_exception_raises_bootstrap_error(self, auth):
         p = LinkedInProvider(auth=auth)
         mock_client = MagicMock()
         mock_client.is_closed = False
         mock_client.get.side_effect = httpx.ConnectError("network down")
         with _patch_client(mock_client):
-            pid = p._get_profile_id()
-        assert pid is None
+            with pytest.raises(RuntimeError, match=r"/voyager/api/me"):
+                p._get_profile_id()
 
     def test_profile_id_from_nested_plain_id(self, auth):
         """Normalized response with plainId under 'data' key."""
@@ -772,8 +796,8 @@ class TestGetProfileId:
             pid = p._get_profile_id()
         assert pid == "urn:li:fsd_profile:TOP"
 
-    def test_profile_id_skips_non_fsd_profile_in_included(self, auth):
-        """included items without fsd_profile in dashEntityUrn are ignored."""
+    def test_profile_id_raises_when_included_has_no_usable_fsd_profile(self, auth):
+        """Responses without a usable profile id should fail explicitly."""
         p = LinkedInProvider(auth=auth)
         mock_client = MagicMock()
         mock_client.is_closed = False
@@ -786,8 +810,8 @@ class TestGetProfileId:
         }
         mock_client.get.return_value = me_resp
         with _patch_client(mock_client):
-            pid = p._get_profile_id()
-        assert pid is None
+            with pytest.raises(RuntimeError, match=r"mailbox/profile ID"):
+                p._get_profile_id()
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ _BACKOFF_MAX_S = 900.0  # 15 min
 # ---------------------------------------------------------------------------
 
 _VOYAGER_BASE = "https://www.linkedin.com/voyager/api"
+_ME_URL = f"{_VOYAGER_BASE}/me"
 _GRAPHQL_BASE = f"{_VOYAGER_BASE}/voyagerMessagingGraphQL/graphql"
 _VOYAGER_TIMEOUT_S = 30.0
 _MAX_PAGES = 50
@@ -351,6 +352,7 @@ class LinkedInProvider:
         self._browser_cookies: Optional[dict[str, str]] = None
         self._profile_id: Optional[str] = None
         self._profile_id_fetched: bool = False
+        self._profile_id_error: Optional[Exception] = None
 
     # ------------------------------------------------------------------
     # Shared helpers — send_message (upstream)
@@ -442,8 +444,19 @@ class LinkedInProvider:
         )
         return self._browser_cookies
 
+    def _cache_profile_id_error(self, exc: Exception) -> None:
+        self._profile_id = None
+        self._profile_id_error = exc
+        self._profile_id_fetched = True
+
+    def _raise_profile_id_error(self, exc: Exception) -> None:
+        self._cache_profile_id_error(exc)
+        raise exc
+
     def _get_profile_id(self) -> Optional[str]:
         if self._profile_id_fetched:
+            if self._profile_id_error is not None:
+                raise self._profile_id_error
             return self._profile_id
         client = self._get_client()
         headers = {
@@ -454,27 +467,83 @@ class LinkedInProvider:
         }
         cookies = self._build_basic_cookies()
         try:
-            resp = client.get(f"{_VOYAGER_BASE}/me", headers=headers, cookies=cookies)
-            if resp.status_code == 200:
-                data = resp.json()
-                pid = data.get("entityUrn") or data.get("publicIdentifier")
-
-                # Normalized response: identifiers nested under "data"
-                if not pid:
-                    inner = data.get("data") or {}
-                    pid = inner.get("plainId") or inner.get("*miniProfile")
-
-                # Fallback: scan "included" array for a fsd_profile dashEntityUrn
-                if not pid:
-                    for item in data.get("included") or []:
-                        urn = item.get("dashEntityUrn")
-                        if urn and "fsd_profile" in urn:
-                            pid = urn
-                            break
-
-                self._profile_id = pid
-        except Exception:
+            resp = client.get(_ME_URL, headers=headers, cookies=cookies)
+        except Exception as exc:
             logger.debug("_get_profile_id: failed to fetch /me", exc_info=True)
+            self._raise_profile_id_error(RuntimeError(
+                "LinkedIn /voyager/api/me bootstrap failed before mailbox discovery. "
+                "Retry sync, and if it keeps failing refresh via POST /accounts/refresh."
+            ))
+
+        if resp.status_code == 401:
+            self._raise_profile_id_error(PermissionError(
+                "LinkedIn /voyager/api/me bootstrap rejected the session (HTTP 401). "
+                "Re-authenticate via POST /accounts/refresh."
+            ))
+
+        if resp.status_code in (302, 303):
+            self._raise_profile_id_error(PermissionError(
+                "LinkedIn /voyager/api/me bootstrap was redirected before mailbox discovery. "
+                "Re-authenticate via POST /accounts/refresh."
+            ))
+
+        if resp.status_code == 403:
+            self._raise_profile_id_error(PermissionError(
+                "LinkedIn /voyager/api/me bootstrap rejected the session (HTTP 403). "
+                "Re-authenticate via POST /accounts/refresh."
+            ))
+
+        if resp.status_code != 200:
+            self._raise_profile_id_error(RuntimeError(
+                f"LinkedIn /voyager/api/me bootstrap failed with HTTP {resp.status_code}. "
+                "Refresh via POST /accounts/refresh and retry sync."
+            ))
+
+        content_type = resp.headers.get("content-type", "")
+        if "text/html" in content_type.lower():
+            self._raise_profile_id_error(RuntimeError(
+                "LinkedIn /voyager/api/me bootstrap returned blocked HTML instead of JSON. "
+                "Refresh via POST /accounts/refresh and retry sync."
+            ))
+
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.debug("_get_profile_id: non-JSON /me response", exc_info=True)
+            self._raise_profile_id_error(RuntimeError(
+                "LinkedIn /voyager/api/me bootstrap returned invalid JSON. "
+                "Refresh via POST /accounts/refresh and retry sync."
+            ))
+
+        if not isinstance(data, dict):
+            self._raise_profile_id_error(RuntimeError(
+                "LinkedIn /voyager/api/me bootstrap returned an unexpected payload. "
+                "Refresh via POST /accounts/refresh and retry sync."
+            ))
+
+        pid = data.get("entityUrn") or data.get("publicIdentifier")
+
+        # Normalized response: identifiers nested under "data"
+        if not pid:
+            inner = data.get("data") or {}
+            pid = inner.get("plainId") or inner.get("*miniProfile")
+
+        # Fallback: scan "included" array for a fsd_profile dashEntityUrn
+        if not pid:
+            for item in data.get("included") or []:
+                urn = item.get("dashEntityUrn")
+                if urn and "fsd_profile" in urn:
+                    pid = urn
+                    break
+
+        if not pid:
+            self._raise_profile_id_error(RuntimeError(
+                "LinkedIn /voyager/api/me bootstrap did not return a usable mailbox/profile ID. "
+                "Refresh via POST /accounts/refresh and retry sync."
+            ))
+
+        self._profile_id = pid
+        self._profile_id_error = None
         self._profile_id_fetched = True
         return self._profile_id
 
@@ -578,8 +647,8 @@ class LinkedInProvider:
         profile_id = self._get_profile_id()
         if not profile_id:
             raise RuntimeError(
-                "Could not determine LinkedIn profile ID. "
-                "Ensure li_at and JSESSIONID cookies are valid."
+                "LinkedIn /voyager/api/me bootstrap did not return a usable mailbox/profile ID. "
+                "Refresh via POST /accounts/refresh and retry sync."
             )
 
         if "fsd_profile:" in profile_id:

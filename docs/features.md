@@ -38,6 +38,8 @@ Status legend:
   - Calls provider thread listing and message fetch.
   - Persists threads, messages, and cursors.
   - Returns counts for synced threads, inserted messages, duplicate skips, fetched pages, and whether rate limiting was encountered.
+  - Returns `401` with the existing refresh hint when LinkedIn rejects `/voyager/api/me` bootstrap as an auth/session failure.
+  - Returns `422` with a bootstrap-specific refresh hint when `/voyager/api/me` returns blocked HTML or another unusable non-auth payload.
 
 - ✅ `POST /send`
   - Sends a message through the provider.
@@ -149,7 +151,8 @@ Status legend:
 
 - ⚠️ Profile discovery dependency
   - GraphQL thread listing depends on a successful `/voyager/api/me` request to derive the mailbox URN.
-  - If that request fails, sync cannot proceed.
+  - Redirected or rejected `/voyager/api/me` bootstrap responses now fail explicitly with refresh guidance instead of silently caching a null profile id.
+  - Blocked HTML or other unusable `/voyager/api/me` payloads now fail explicitly and leave stored auth untouched.
 
 ## Reliability and rate limiting
 
