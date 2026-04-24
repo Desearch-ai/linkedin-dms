@@ -56,6 +56,29 @@ class AccountAuth:
 
 
 @dataclass(frozen=True)
+class BrowserContext:
+    """Extension-captured browser request metadata for a LinkedIn session.
+
+    These values are captured from real browser requests by the Chrome extension
+    and are more authentic than server-side reconstructions.
+
+    IMPORTANT: csrf_token is security-sensitive; treat like auth material, never log.
+    """
+
+    x_li_track: Optional[str] = None
+    csrf_token: Optional[str] = None
+
+    def __repr__(self) -> str:
+        return "BrowserContext(x_li_track='[REDACTED]', csrf_token='[REDACTED]')"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def is_empty(self) -> bool:
+        return not self.x_li_track and not self.csrf_token
+
+
+@dataclass(frozen=True)
 class Account:
     id: int
     label: str

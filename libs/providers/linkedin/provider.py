@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import httpx
 
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, BrowserContext, ProxyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -339,10 +339,12 @@ class LinkedInProvider:
         auth: AccountAuth,
         proxy: Optional[ProxyConfig] = None,
         account_id: Optional[int] = None,
+        browser_context: Optional[BrowserContext] = None,
     ):
         self.auth = auth
         self.proxy = proxy
         self._account_id = account_id
+        self.browser_context = browser_context
         # send_message state (upstream)
         self._sent_keys: dict[str, str] = {}
         self._last_send_ts: float = 0.0
@@ -359,8 +361,15 @@ class LinkedInProvider:
     # ------------------------------------------------------------------
 
     def _build_headers(self) -> dict[str, str]:
-        csrf_token = self.auth.jsessionid or ""
-        return {**_BASE_HEADERS, "csrf-token": csrf_token}
+        csrf_token = (
+            (self.browser_context and self.browser_context.csrf_token)
+            or self.auth.jsessionid
+            or ""
+        )
+        headers = {**_BASE_HEADERS, "csrf-token": csrf_token}
+        if self.browser_context and self.browser_context.x_li_track:
+            headers["x-li-track"] = self.browser_context.x_li_track
+        return headers
 
     def _get_cookies(self) -> dict[str, str]:
         cookies: dict[str, str] = {"li_at": self.auth.li_at}
@@ -402,23 +411,28 @@ class LinkedInProvider:
         self.close()
 
     def _build_graphql_headers(self) -> dict[str, str]:
-        if not self.auth.jsessionid or not self.auth.jsessionid.strip():
+        csrf_token = (
+            (self.browser_context and self.browser_context.csrf_token)
+            or self.auth.jsessionid
+        )
+        if not csrf_token or not csrf_token.strip():
             raise ValueError("JSESSIONID cookie required for Voyager API (CSRF)")
+        x_li_track = (self.browser_context and self.browser_context.x_li_track) or json.dumps({
+            "clientVersion": "1.13.42912",
+            "mpVersion": "1.13.42912",
+            "osName": "web",
+            "timezoneOffset": 0,
+            "deviceFormFactor": "DESKTOP",
+            "mpName": "voyager-web",
+        })
         return {
             "User-Agent": _BROWSER_USER_AGENT,
             "Accept": "application/graphql",
             "x-restli-protocol-version": "2.0.0",
-            "x-li-track": json.dumps({
-                "clientVersion": "1.13.42912",
-                "mpVersion": "1.13.42912",
-                "osName": "web",
-                "timezoneOffset": 0,
-                "deviceFormFactor": "DESKTOP",
-                "mpName": "voyager-web",
-            }),
+            "x-li-track": x_li_track,
             "x-li-page-instance": "urn:li:page:d_flagship3_messaging",
             "x-li-lang": "en_US",
-            "csrf-token": self.auth.jsessionid,
+            "csrf-token": csrf_token,
             "referer": _MESSAGING_PAGE_URL,
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",

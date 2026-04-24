@@ -852,3 +852,149 @@ def test_run_send_same_key_different_accounts_are_independent(storage):
     assert r1.was_duplicate is False
     assert r2.was_duplicate is False
     assert provider.send_message.call_count == 2
+
+
+# --- Browser context threading tests ---
+
+
+def test_sync_endpoint_stores_and_threads_browser_context(storage, account_id):
+    """When /sync receives x_li_track and csrf_token, they are stored and passed to the provider."""
+    from unittest.mock import patch, MagicMock, call
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+    from libs.core.models import BrowserContext
+
+    provider = MagicMock()
+    provider.rate_limit_encountered = False
+    provider.list_threads.return_value = []
+
+    captured_context = {}
+
+    def fake_provider(**kwargs):
+        captured_context.update(kwargs)
+        return provider
+
+    with patch("apps.api.main.storage", storage), patch("apps.api.main.LinkedInProvider", side_effect=fake_provider):
+        client = TestClient(app)
+        resp = client.post(
+            "/sync",
+            json={
+                "account_id": account_id,
+                "x_li_track": '{"clientVersion":"1.13.42912"}',
+                "csrf_token": "ajax:test-csrf",
+            },
+        )
+    assert resp.status_code == 200
+    ctx = captured_context.get("browser_context")
+    assert ctx is not None
+    assert ctx.x_li_track == '{"clientVersion":"1.13.42912"}'
+    assert ctx.csrf_token == "ajax:test-csrf"
+    stored = storage.get_browser_context(account_id)
+    assert stored is not None
+    assert stored.csrf_token == "ajax:test-csrf"
+
+
+def test_send_endpoint_stores_and_threads_browser_context(storage, account_id):
+    """When /send receives x_li_track and csrf_token, they are stored and passed to the provider."""
+    from unittest.mock import patch, MagicMock
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+    from libs.core.models import BrowserContext
+    from libs.core.job_runner import SendResult
+
+    provider = MagicMock(spec=LinkedInProvider)
+    provider.send_message.return_value = "msg-ctx-1"
+
+    captured_context = {}
+
+    def fake_provider(**kwargs):
+        captured_context.update(kwargs)
+        return provider
+
+    with patch("apps.api.main.storage", storage), patch("apps.api.main.LinkedInProvider", side_effect=fake_provider):
+        client = TestClient(app)
+        resp = client.post(
+            "/send",
+            json={
+                "account_id": account_id,
+                "recipient": "alice",
+                "text": "hello",
+                "x_li_track": '{"clientVersion":"1.99.0"}',
+                "csrf_token": "ajax:send-csrf",
+            },
+        )
+    assert resp.status_code == 200
+    ctx = captured_context.get("browser_context")
+    assert ctx is not None
+    assert ctx.x_li_track == '{"clientVersion":"1.99.0"}'
+    stored = storage.get_browser_context(account_id)
+    assert stored is not None
+    assert stored.csrf_token == "ajax:send-csrf"
+
+
+def test_sync_endpoint_uses_stored_context_when_not_provided(storage, account_id):
+    """If browser context was previously stored, /sync uses it even without new fields."""
+    from unittest.mock import patch, MagicMock
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+    from libs.core.models import BrowserContext
+
+    storage.update_browser_context(account_id, BrowserContext(x_li_track="stored-track", csrf_token="stored-csrf"))
+
+    provider = MagicMock()
+    provider.rate_limit_encountered = False
+    provider.list_threads.return_value = []
+    captured_context = {}
+
+    def fake_provider(**kwargs):
+        captured_context.update(kwargs)
+        return provider
+
+    with patch("apps.api.main.storage", storage), patch("apps.api.main.LinkedInProvider", side_effect=fake_provider):
+        client = TestClient(app)
+        resp = client.post("/sync", json={"account_id": account_id})
+    assert resp.status_code == 200
+    ctx = captured_context.get("browser_context")
+    assert ctx is not None
+    assert ctx.x_li_track == "stored-track"
+    assert ctx.csrf_token == "stored-csrf"
+
+
+def test_provider_build_graphql_headers_prefers_browser_context():
+    """Provider uses browser_context x_li_track and csrf_token over hardcoded values."""
+    from libs.core.models import BrowserContext
+
+    ctx = BrowserContext(x_li_track='{"clientVersion":"browser"}', csrf_token="ajax:browser-csrf")
+    auth = AccountAuth(li_at="x", jsessionid="ajax:fallback")
+    provider = LinkedInProvider(auth=auth, browser_context=ctx)
+    headers = provider._build_graphql_headers()
+    assert headers["x-li-track"] == '{"clientVersion":"browser"}'
+    assert headers["csrf-token"] == "ajax:browser-csrf"
+
+
+def test_provider_build_graphql_headers_falls_back_to_jsessionid():
+    """Provider falls back to jsessionid when no browser_context is provided."""
+    auth = AccountAuth(li_at="x", jsessionid="ajax:fallback")
+    provider = LinkedInProvider(auth=auth)
+    headers = provider._build_graphql_headers()
+    assert headers["csrf-token"] == "ajax:fallback"
+
+
+def test_provider_build_headers_prefers_browser_context():
+    """_build_headers uses browser_context csrf_token and x_li_track for send."""
+    from libs.core.models import BrowserContext
+
+    ctx = BrowserContext(x_li_track='{"v":"browser"}', csrf_token="ajax:browser-csrf")
+    auth = AccountAuth(li_at="x", jsessionid="ajax:fallback")
+    provider = LinkedInProvider(auth=auth, browser_context=ctx)
+    headers = provider._build_headers()
+    assert headers["csrf-token"] == "ajax:browser-csrf"
+    assert headers["x-li-track"] == '{"v":"browser"}'
+
+
+def test_provider_build_headers_falls_back_to_jsessionid():
+    """_build_headers falls back to jsessionid csrf when no browser_context."""
+    auth = AccountAuth(li_at="x", jsessionid="ajax:session")
+    provider = LinkedInProvider(auth=auth)
+    headers = provider._build_headers()
+    assert headers["csrf-token"] == "ajax:session"

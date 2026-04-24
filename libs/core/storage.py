@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .crypto import decrypt_if_encrypted, encrypt_if_configured
-from .models import AccountAuth, ProxyConfig
+from .models import AccountAuth, BrowserContext, ProxyConfig
 
 
 def utcnow() -> datetime:
@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS outbound_sends (
   FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_sends_account_status ON outbound_sends(account_id, status);
+"""
+
+_MIGRATION_4_BROWSER_CONTEXT = """
+ALTER TABLE accounts ADD COLUMN browser_context_json TEXT;
 """
 
 
@@ -170,6 +174,7 @@ class Storage:
             (1, _MIGRATION_1_INDEXES),
             (2, _MIGRATION_2_MESSAGES_CHECK),
             (3, _MIGRATION_3_OUTBOUND_SENDS),
+            (4, _MIGRATION_4_BROWSER_CONTEXT),
         ]
         for version, sql in migrations:
             if version > current:
@@ -229,6 +234,34 @@ class Storage:
             return None
         d = json.loads(decrypt_if_encrypted(row["proxy_json"]))
         return ProxyConfig(**d)
+
+    def update_browser_context(self, account_id: int, ctx: BrowserContext) -> None:
+        """Persist extension-captured browser context for an account.
+
+        Raises KeyError if the account does not exist.
+        """
+        row = self._conn.execute("SELECT id FROM accounts WHERE id=?", (account_id,)).fetchone()
+        if not row:
+            raise KeyError(f"account {account_id} not found")
+        ctx_json = encrypt_if_configured(json.dumps({"x_li_track": ctx.x_li_track, "csrf_token": ctx.csrf_token}))
+        self._conn.execute(
+            "UPDATE accounts SET browser_context_json=? WHERE id=?",
+            (ctx_json, account_id),
+        )
+        self._conn.commit()
+
+    def get_browser_context(self, account_id: int) -> Optional[BrowserContext]:
+        """Return stored browser context for an account, or None if not yet captured."""
+        row = self._conn.execute(
+            "SELECT browser_context_json FROM accounts WHERE id=?", (account_id,)
+        ).fetchone()
+        if not row:
+            raise KeyError(f"account {account_id} not found")
+        if not row["browser_context_json"]:
+            return None
+        d = json.loads(decrypt_if_encrypted(row["browser_context_json"]))
+        ctx = BrowserContext(**d)
+        return None if ctx.is_empty() else ctx
 
     def upsert_thread(self, *, account_id: int, platform_thread_id: str, title: Optional[str]) -> int:
         created_at = utcnow().isoformat()

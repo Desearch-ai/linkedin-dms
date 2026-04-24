@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
 from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, SyncResult
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, BrowserContext, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider, MAX_MESSAGES_PER_PAGE
@@ -100,6 +100,8 @@ class SendIn(BaseModel):
     recipient: str = Field(..., min_length=1, description="Recipient id (profile URN or conversation id)")
     text: str = Field(..., min_length=1, max_length=8000, description="Message body")
     idempotency_key: str | None = None
+    x_li_track: str | None = Field(None, description="Extension-captured x-li-track header value")
+    csrf_token: str | None = Field(None, description="Extension-captured csrf-token header value")
 
 
 class SyncIn(BaseModel):
@@ -117,6 +119,8 @@ class SyncIn(BaseModel):
     delay_between_pages_s: float = Field(
         1.5, ge=0, le=60, description="Seconds to pause between fetch_messages pages",
     )
+    x_li_track: str | None = Field(None, description="Extension-captured x-li-track header value")
+    csrf_token: str | None = Field(None, description="Extension-captured csrf-token header value")
 
 
 @app.get("/health")
@@ -181,7 +185,11 @@ def sync_account(body: SyncIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
+    incoming_ctx = BrowserContext(x_li_track=body.x_li_track, csrf_token=body.csrf_token)
+    if not incoming_ctx.is_empty():
+        storage.update_browser_context(body.account_id, incoming_ctx)
+    browser_context = storage.get_browser_context(body.account_id)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id, browser_context=browser_context)
     sync_config = SyncConfig(
         delay_between_threads_s=body.delay_between_threads_s,
         delay_between_pages_s=body.delay_between_pages_s,
@@ -230,7 +238,11 @@ def send_message(body: SendIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
+    incoming_ctx = BrowserContext(x_li_track=body.x_li_track, csrf_token=body.csrf_token)
+    if not incoming_ctx.is_empty():
+        storage.update_browser_context(body.account_id, incoming_ctx)
+    browser_context = storage.get_browser_context(body.account_id)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id, browser_context=browser_context)
     try:
         result: SendResult = run_send(
             account_id=body.account_id,

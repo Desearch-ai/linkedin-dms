@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from libs.core import crypto
-from libs.core.models import AccountAuth
+from libs.core.models import AccountAuth, BrowserContext
 from libs.core.storage import Storage
 
 
@@ -56,8 +56,8 @@ def test_schema_version_exists_after_migrate(storage):
 
 
 def test_schema_version_is_current_after_migrate(storage):
-    """Regression: migrate() leaves schema at current version (3 = outbound_sends)."""
-    assert storage._get_schema_version() == 3
+    """Regression: migrate() leaves schema at current version (4 = browser_context)."""
+    assert storage._get_schema_version() == 4
 
 
 def test_migrate_idempotent(storage):
@@ -116,7 +116,7 @@ def test_migrate_upgrades_preexisting_baseline_db(tmp_path):
     s.migrate()
 
     # Verify schema_version is current.
-    assert s._get_schema_version() == 3
+    assert s._get_schema_version() == 4
 
     # Verify indexes exist.
     indexes = {r[0] for r in s._conn.execute(
@@ -335,3 +335,59 @@ def test_foreign_key_cascade_deletes_threads_on_account_delete(storage):
     assert rows[0] == 0
     rows = storage._conn.execute("SELECT COUNT(*) FROM sync_cursors").fetchone()
     assert rows[0] == 0
+
+
+# --- Browser context tests ---
+
+
+def test_get_browser_context_returns_none_when_not_set(storage):
+    auth = AccountAuth(li_at="test-li-at", jsessionid=None)
+    aid = storage.create_account(label="t", auth=auth)
+    assert storage.get_browser_context(aid) is None
+
+
+def test_update_and_get_browser_context(storage):
+    auth = AccountAuth(li_at="test-li-at", jsessionid=None)
+    aid = storage.create_account(label="t", auth=auth)
+    ctx = BrowserContext(x_li_track='{"clientVersion":"1.13.42912"}', csrf_token="ajax:abc123")
+    storage.update_browser_context(aid, ctx)
+    result = storage.get_browser_context(aid)
+    assert result is not None
+    assert result.x_li_track == '{"clientVersion":"1.13.42912"}'
+    assert result.csrf_token == "ajax:abc123"
+
+
+def test_update_browser_context_overwrites_previous(storage):
+    auth = AccountAuth(li_at="test-li-at", jsessionid=None)
+    aid = storage.create_account(label="t", auth=auth)
+    storage.update_browser_context(aid, BrowserContext(x_li_track="old", csrf_token="old-csrf"))
+    storage.update_browser_context(aid, BrowserContext(x_li_track="new", csrf_token="new-csrf"))
+    result = storage.get_browser_context(aid)
+    assert result.x_li_track == "new"
+    assert result.csrf_token == "new-csrf"
+
+
+def test_update_browser_context_raises_for_unknown_account(storage):
+    with pytest.raises(KeyError):
+        storage.update_browser_context(9999, BrowserContext(x_li_track="x"))
+
+
+def test_get_browser_context_raises_for_unknown_account(storage):
+    with pytest.raises(KeyError):
+        storage.get_browser_context(9999)
+
+
+def test_get_browser_context_returns_none_for_empty_context(storage):
+    auth = AccountAuth(li_at="test-li-at", jsessionid=None)
+    aid = storage.create_account(label="t", auth=auth)
+    storage.update_browser_context(aid, BrowserContext())
+    assert storage.get_browser_context(aid) is None
+
+
+def test_browser_context_column_added_by_migration(tmp_path):
+    db_path = tmp_path / "browser_ctx.sqlite"
+    s = Storage(db_path=str(db_path))
+    s.migrate()
+    cols = {r[1] for r in s._conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    assert "browser_context_json" in cols
+    s.close()

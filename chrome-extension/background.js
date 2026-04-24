@@ -174,10 +174,15 @@ async function handleManualSync() {
     throw new Error("No account registered. Log in to LinkedIn first.");
   }
 
+  const captured = await chrome.storage.local.get({ xLiTrack: null, csrfToken: null });
+  const payload = { account_id: config.accountId };
+  if (captured.xLiTrack) payload.x_li_track = captured.xLiTrack;
+  if (captured.csrfToken) payload.csrf_token = captured.csrfToken;
+
   const resp = await fetch(`${config.serviceUrl}/sync`, {
     method: "POST",
     headers: buildServiceHeaders(config),
-    body: JSON.stringify({ account_id: config.accountId }),
+    body: JSON.stringify(payload),
   });
 
   if (!resp.ok) {

@@ -307,6 +307,47 @@ async function testAC5b_manualSyncIncludesBearerToken() {
   }
 }
 
+async function testAC5c_manualSyncThreadsBrowserContext() {
+  console.log("\nAC5c: MANUAL_SYNC threads captured x_li_track and csrf_token into payload");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
+  env.storage.csrfToken = "ajax:abc123";
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, "sync response is ok");
+
+  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
+  assert(!!syncCall, "POST /sync was called");
+  if (syncCall) {
+    const body = JSON.parse(syncCall.options.body);
+    assert(body.account_id === 1, "account_id passed to sync");
+    assert(body.x_li_track === '{"clientVersion":"1.13.42912"}', "x_li_track threaded into sync payload");
+    assert(body.csrf_token === "ajax:abc123", "csrf_token threaded into sync payload");
+  }
+}
+
+async function testAC5d_manualSyncOmitsContextWhenNotCaptured() {
+  console.log("\nAC5d: MANUAL_SYNC omits browser context fields when not yet captured");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  // xLiTrack and csrfToken are not set in storage
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, "sync response is ok");
+
+  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
+  assert(!!syncCall, "POST /sync was called");
+  if (syncCall) {
+    const body = JSON.parse(syncCall.options.body);
+    assert(body.account_id === 1, "account_id present");
+    assert(!("x_li_track" in body), "x_li_track absent when not captured");
+    assert(!("csrf_token" in body), "csrf_token absent when not captured");
+  }
+}
+
 async function testAC6_manualRefresh() {
   console.log("\nAC6: MANUAL_REFRESH triggers cookie refresh");
   const env = buildEnv();
@@ -333,6 +374,8 @@ async function main() {
   await testAC4_headerCapture();
   await testAC5_manualSync();
   await testAC5b_manualSyncIncludesBearerToken();
+  await testAC5c_manualSyncThreadsBrowserContext();
+  await testAC5d_manualSyncOmitsContextWhenNotCaptured();
   await testAC6_manualRefresh();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
