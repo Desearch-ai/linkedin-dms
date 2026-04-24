@@ -641,6 +641,31 @@ def test_sync_endpoint_422_when_jsessionid_missing(storage, account_id):
     assert resp.status_code == 422
     assert "jsessionid" in resp.json()["detail"].lower()
 
+def test_sync_endpoint_422_when_me_bootstrap_returns_blocked_html(storage, account_id):
+    from unittest.mock import MagicMock, patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    provider = MagicMock()
+    provider.rate_limit_encountered = False
+    provider.list_threads.side_effect = RuntimeError(
+        "LinkedIn /voyager/api/me bootstrap returned blocked HTML. "
+        "Refresh via POST /accounts/refresh and retry sync."
+    )
+
+    with patch("apps.api.main.storage", storage), patch(
+        "apps.api.main.LinkedInProvider", return_value=provider
+    ):
+        client = TestClient(app)
+        resp = client.post(
+            "/sync",
+            json={"account_id": account_id, "limit_per_thread": 50},
+        )
+
+    assert resp.status_code == 422
+    assert "/voyager/api/me" in resp.json()["detail"]
+    assert "POST /accounts/refresh" in resp.json()["detail"]
+
 
 def test_sync_endpoint_returns_detailed_counts(storage, account_id):
     from unittest.mock import patch, MagicMock

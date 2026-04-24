@@ -167,6 +167,23 @@ class TestSessionExpired401:
         assert resp.status_code == 401
         assert "re-authenticate via POST /accounts/refresh" in resp.json()["detail"]
 
+    def test_sync_returns_bootstrap_401_detail_when_provider_includes_refresh_hint(self, client):
+        aid = _create_account(client)
+        with patch(
+            "apps.api.main.run_sync",
+            side_effect=PermissionError(
+                "LinkedIn /voyager/api/me bootstrap was redirected before mailbox discovery. "
+                "Re-authenticate via POST /accounts/refresh."
+            ),
+        ):
+            resp = client.post(
+                "/sync",
+                json={"account_id": aid},
+            )
+        assert resp.status_code == 401
+        assert "/voyager/api/me" in resp.json()["detail"]
+        assert "POST /accounts/refresh" in resp.json()["detail"]
+
     def test_send_401_then_refresh_then_send_succeeds(self, client):
         """Full flow: send fails with 401, client refreshes cookies, send succeeds."""
         aid = _create_account(client)
