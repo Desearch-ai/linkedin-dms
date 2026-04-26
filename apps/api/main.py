@@ -6,6 +6,7 @@ import secrets
 from dataclasses import replace
 from typing import Optional
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
@@ -50,6 +51,7 @@ def require_api_auth(authorization: str | None = Header(default=None)) -> None:
 
 class AuthCheckResponse(BaseModel):
     status: str
+    verification: str = "local"  # "local" | "live"
     error: Optional[str] = None
 
 
@@ -201,15 +203,16 @@ def auth_check(account_id: int):
         auth = storage.get_account_auth(account_id)
         proxy = storage.get_account_proxy(account_id)
     except KeyError:
-        return {"status": "failed", "error": "account not found"}
+        return {"status": "failed", "verification": "local", "error": "account not found"}
 
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
+    browser_context = storage.get_browser_context(account_id)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, browser_context=browser_context)
     result = provider.check_auth()
 
     if result.ok:
-        return {"status": "ok", "error": None}
+        return {"status": "ok", "verification": result.verification, "error": None}
 
-    return {"status": "failed", "error": result.error or "authentication check failed"}
+    return {"status": "failed", "verification": result.verification, "error": result.error or "authentication check failed"}
 
 
 @app.get("/threads", dependencies=[Depends(require_api_auth)])
@@ -266,6 +269,14 @@ def sync_account(body: SyncIn):
             status_code=501,
             detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
         ) from None
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (429, 999):
+            raise HTTPException(status_code=429, detail="LinkedIn rate limit — retry after backoff") from exc
+        raise HTTPException(
+            status_code=502, detail=f"LinkedIn upstream error: HTTP {exc.response.status_code}"
+        ) from exc
+    except ConnectionError:
+        raise HTTPException(status_code=503, detail="LinkedIn network error — retry later") from None
     except (ValueError, RuntimeError) as e:
         raise HTTPException(
             status_code=422,
@@ -317,6 +328,14 @@ def send_message(body: SendIn):
             status_code=501,
             detail="Provider not implemented. Implement libs/providers/linkedin/provider.py",
         ) from None
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (429, 999):
+            raise HTTPException(status_code=429, detail="LinkedIn rate limit — retry after backoff") from exc
+        raise HTTPException(
+            status_code=502, detail=f"LinkedIn upstream error: HTTP {exc.response.status_code}"
+        ) from exc
+    except ConnectionError:
+        raise HTTPException(status_code=503, detail="LinkedIn network error — retry later") from None
 
 
 @app.get("/sends", dependencies=[Depends(require_api_auth)])

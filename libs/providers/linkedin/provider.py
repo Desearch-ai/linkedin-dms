@@ -98,6 +98,7 @@ class LinkedInMessage:
 class AuthCheckResult:
     ok: bool
     error: Optional[str] = None
+    verification: str = "local"  # "local" | "live"
 
 
 def _extract_message_id(data: dict[str, Any]) -> str:
@@ -955,8 +956,10 @@ class LinkedInProvider:
                 self.rate_limit_encountered = True
                 rate_limit_hits += 1
                 if rate_limit_hits > _MAX_RATE_LIMIT_RETRIES:
-                    raise RuntimeError(
-                        f"Rate-limited {rate_limit_hits} times, giving up"
+                    raise httpx.HTTPStatusError(
+                        f"Rate-limited {rate_limit_hits} times, giving up",
+                        request=resp.request,
+                        response=resp,
                     )
                 backoff = min(
                     _BACKOFF_START_S * (2 ** (rate_limit_hits - 1)), _BACKOFF_MAX_S
@@ -992,20 +995,25 @@ class LinkedInProvider:
             return platform_message_id
 
     def check_auth(self) -> AuthCheckResult:
-        """Perform a lightweight auth sanity check.
+        """Validate auth via a live /voyager/api/me probe.
 
-        MVP behavior:
-        - verify required cookie presence
-        - optionally verify optional cookie format
-        - placeholder for future lightweight LinkedIn request
+        Local sanity check runs first; if that passes, a real HTTP request to
+        LinkedIn confirms whether the stored session is actually accepted.  This
+        prevents the false-green case where locally-refreshed cookies look valid
+        but are already rejected by LinkedIn.
 
-        IMPORTANT:
-        - do not leak cookie values in errors
+        IMPORTANT: do not leak cookie values in errors.
         """
         if not self.auth.li_at or not self.auth.li_at.strip():
-            return AuthCheckResult(ok=False, error="missing li_at cookie")
+            return AuthCheckResult(ok=False, error="missing li_at cookie", verification="local")
 
         if self.auth.jsessionid is not None and not self.auth.jsessionid.strip():
-            return AuthCheckResult(ok=False, error="invalid JSESSIONID cookie")
+            return AuthCheckResult(ok=False, error="invalid JSESSIONID cookie", verification="local")
 
-        return AuthCheckResult(ok=True, error=None)
+        try:
+            self._get_profile_id()
+            return AuthCheckResult(ok=True, verification="live")
+        except PermissionError as exc:
+            return AuthCheckResult(ok=False, error=str(exc), verification="live")
+        except Exception as exc:
+            return AuthCheckResult(ok=False, error=f"live check failed: {exc}", verification="live")
