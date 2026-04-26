@@ -406,7 +406,7 @@ class TestSendMessageRateLimiting:
         client.post.return_value = _make_mock_response(429)
 
         provider = _make_provider()
-        with pytest.raises(RuntimeError, match="Rate-limited"):
+        with pytest.raises(httpx.HTTPStatusError):
             provider.send_message(recipient=SAMPLE_RECIPIENT, text="Hi")
 
         assert client.post.call_count == 6  # 5 retries + 1 final that triggers raise

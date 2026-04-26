@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -219,3 +220,138 @@ class TestSessionExpired401:
             )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+
+
+class TestAuthCheckLiveVerification:
+    """Regression tests for false-green /auth/check: local cookie presence is not enough."""
+
+    def test_auth_check_live_rejected_returns_failed(self, client):
+        """If live /voyager/api/me rejects the session, auth/check must return failed."""
+        aid = _create_account(client)
+        with patch(
+            "libs.providers.linkedin.provider.LinkedInProvider._get_profile_id",
+            side_effect=PermissionError(
+                "LinkedIn /voyager/api/me bootstrap rejected the session (HTTP 401). "
+                "Re-authenticate via POST /accounts/refresh."
+            ),
+        ):
+            resp = client.get(f"/auth/check?account_id={aid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "failed"
+        assert data["verification"] == "live"
+        assert "401" in data["error"]
+
+    def test_auth_check_live_ok_returns_ok_with_live_verification(self, client):
+        """If live /voyager/api/me accepts the session, auth/check must return ok with verification=live."""
+        aid = _create_account(client)
+        with patch(
+            "libs.providers.linkedin.provider.LinkedInProvider._get_profile_id",
+            return_value="urn:li:fsd_profile:test123",
+        ):
+            resp = client.get(f"/auth/check?account_id={aid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["verification"] == "live"
+        assert data["error"] is None
+
+    def test_false_green_regression_locally_valid_but_live_rejected(self, client):
+        """Regression: an account with locally valid li_at that LinkedIn rejects must not return ok."""
+        aid = _create_account(client)
+        with patch(
+            "libs.providers.linkedin.provider.LinkedInProvider._get_profile_id",
+            side_effect=PermissionError("session expired"),
+        ):
+            resp = client.get(f"/auth/check?account_id={aid}")
+        data = resp.json()
+        assert data["status"] == "failed", (
+            "auth/check returned ok for a live-rejected session (false-green)"
+        )
+        assert data["verification"] == "live"
+
+    def test_auth_check_network_failure_returns_failed_not_ok(self, client):
+        """Network error during live check should not silently pass as ok."""
+        aid = _create_account(client)
+        with patch(
+            "libs.providers.linkedin.provider.LinkedInProvider._get_profile_id",
+            side_effect=RuntimeError("connection refused"),
+        ):
+            resp = client.get(f"/auth/check?account_id={aid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "failed"
+        assert data["verification"] == "live"
+
+
+class TestSyncSendApiErrorMapping:
+    """Stable API error responses for httpx.HTTPStatusError and ConnectionError from provider."""
+
+    def _make_http_status_error(self, status_code: int) -> httpx.HTTPStatusError:
+        req = MagicMock(spec=httpx.Request)
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = status_code
+        return httpx.HTTPStatusError(f"HTTP {status_code}", request=req, response=resp)
+
+    def test_sync_returns_429_on_rate_limit_http_error(self, client):
+        aid = _create_account(client)
+        with patch(
+            "apps.api.main.run_sync",
+            side_effect=self._make_http_status_error(429),
+        ):
+            resp = client.post("/sync", json={"account_id": aid})
+        assert resp.status_code == 429
+        assert "rate limit" in resp.json()["detail"].lower()
+
+    def test_sync_returns_502_on_upstream_http_error(self, client):
+        aid = _create_account(client)
+        with patch(
+            "apps.api.main.run_sync",
+            side_effect=self._make_http_status_error(500),
+        ):
+            resp = client.post("/sync", json={"account_id": aid})
+        assert resp.status_code == 502
+        assert "500" in resp.json()["detail"]
+
+    def test_sync_returns_503_on_connection_error(self, client):
+        aid = _create_account(client)
+        with patch("apps.api.main.run_sync", side_effect=ConnectionError("refused")):
+            resp = client.post("/sync", json={"account_id": aid})
+        assert resp.status_code == 503
+        assert "network" in resp.json()["detail"].lower()
+
+    def test_send_returns_429_on_rate_limit_http_error(self, client):
+        aid = _create_account(client)
+        with patch(
+            "apps.api.main.run_send",
+            side_effect=self._make_http_status_error(429),
+        ):
+            resp = client.post(
+                "/send",
+                json={"account_id": aid, "recipient": "urn:li:member:123", "text": "hi"},
+            )
+        assert resp.status_code == 429
+        assert "rate limit" in resp.json()["detail"].lower()
+
+    def test_send_returns_502_on_upstream_http_error(self, client):
+        aid = _create_account(client)
+        with patch(
+            "apps.api.main.run_send",
+            side_effect=self._make_http_status_error(503),
+        ):
+            resp = client.post(
+                "/send",
+                json={"account_id": aid, "recipient": "urn:li:member:123", "text": "hi"},
+            )
+        assert resp.status_code == 502
+        assert "503" in resp.json()["detail"]
+
+    def test_send_returns_503_on_connection_error(self, client):
+        aid = _create_account(client)
+        with patch("apps.api.main.run_send", side_effect=ConnectionError("refused")):
+            resp = client.post(
+                "/send",
+                json={"account_id": aid, "recipient": "urn:li:member:123", "text": "hi"},
+            )
+        assert resp.status_code == 503
+        assert "network" in resp.json()["detail"].lower()
