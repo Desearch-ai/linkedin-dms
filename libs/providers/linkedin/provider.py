@@ -61,10 +61,11 @@ _RETRYABLE_STATUS_CODES = frozenset({429, 999, 500, 502, 503, 504})
 _RATE_LIMIT_STATUS_CODES = frozenset({429, 999})
 _PLAYWRIGHT_NAV_RETRIES = 2
 
-# NOTE: These queryId hashes are extracted from LinkedIn's frontend JS bundle.
-# LinkedIn may rotate them without notice. If requests start returning 400/404,
-# update by inspecting XHR calls on linkedin.com/messaging/ in browser DevTools
-# and extracting the new queryId values from the graphql request URLs.
+# FALLBACK: These queryId hashes are extracted from LinkedIn's frontend JS bundle.
+# The chrome extension captures live queryIds from real browser traffic and
+# forwards them via the messaging_contract field in POST /sync — prefer those
+# over these values. Update here only if the extension has not yet captured fresh
+# ids and requests start returning HTTP 400 (see GitHub issue #37).
 _CONVERSATIONS_QUERY_ID = "messengerConversations.0d5e6781bbee71c3e51c8843c6519f48"
 _MESSAGES_QUERY_ID = "messengerMessages.21eabeb3ee872254060ef21b793ea7d0"
 

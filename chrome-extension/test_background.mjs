@@ -135,6 +135,7 @@ function loadBackground(env) {
     JSON,
     Error,
     setTimeout,
+    URL, // needed for URL parsing in captureMessagingContract
   });
   const script = new Script(code, { filename: "background.js" });
   script.runInContext(ctx);
@@ -390,6 +391,142 @@ async function testAC6_manualRefresh() {
   assert(!!refreshCall, "POST /accounts/refresh was called");
 }
 
+async function testAC7_messagingContractConversations() {
+  console.log("\nAC7: Captures conversations queryId from real messaging traffic");
+  const env = buildEnv();
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  const url =
+    "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+    "?queryId=messengerConversations.abc123def456&variables=(mailboxUrn:urn:li:fsd_profile:42,count:20)";
+
+  await headerListener.fn({
+    url,
+    requestHeaders: [
+      { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
+      { name: "csrf-token", value: "ajax:abc123" },
+    ],
+  });
+
+  const contract = env.storage.messagingContract;
+  assert(!!contract, "messagingContract stored after conversations request");
+  assert(
+    contract.conversationsQueryId === "messengerConversations.abc123def456",
+    "conversationsQueryId captured correctly"
+  );
+  assert(
+    contract.endpointPath === "/voyager/api/voyagerMessagingGraphQL/graphql",
+    "endpointPath captured"
+  );
+  assert(!!contract.capturedAt, "capturedAt recorded");
+  assert(Array.isArray(contract.conversationsVariablesShape), "conversationsVariablesShape is an array");
+  assert(contract.conversationsVariablesShape.includes("mailboxUrn"), "mailboxUrn key in shape");
+  assert(contract.conversationsVariablesShape.includes("count"), "count key in shape");
+}
+
+async function testAC7b_messagingContractMessages() {
+  console.log("\nAC7b: Captures messages queryId from real messaging traffic");
+  const env = buildEnv();
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  const url =
+    "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+    "?queryId=messengerMessages.def456abc789&variables=(conversationUrn:2-abc,count:50,createdBefore:1234567890)";
+
+  await headerListener.fn({
+    url,
+    requestHeaders: [
+      { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
+    ],
+  });
+
+  const contract = env.storage.messagingContract;
+  assert(!!contract, "messagingContract stored after messages request");
+  assert(
+    contract.messagesQueryId === "messengerMessages.def456abc789",
+    "messagesQueryId captured correctly"
+  );
+  assert(Array.isArray(contract.messagesVariablesShape), "messagesVariablesShape is an array");
+  assert(contract.messagesVariablesShape.includes("conversationUrn"), "conversationUrn key in shape");
+  assert(contract.messagesVariablesShape.includes("count"), "count key in shape");
+  assert(contract.messagesVariablesShape.includes("createdBefore"), "createdBefore key in shape");
+}
+
+async function testAC7c_messagingContractNoSecrets() {
+  console.log("\nAC7c: Messaging contract does not store cookies or raw auth values");
+  const env = buildEnv();
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  const url =
+    "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+    "?queryId=messengerConversations.abc123&variables=(mailboxUrn:urn:li:fsd_profile:42)";
+
+  await headerListener.fn({
+    url,
+    requestHeaders: [
+      { name: "cookie", value: "li_at=super-secret-li-at-token; JSESSIONID=js123" },
+      { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
+      { name: "csrf-token", value: "ajax:csrf999" },
+    ],
+  });
+
+  const contract = env.storage.messagingContract;
+  assert(!!contract, "messagingContract stored");
+  const contractStr = JSON.stringify(contract);
+  assert(!contractStr.includes("super-secret-li-at-token"), "li_at cookie value not in stored contract");
+  assert(!contractStr.includes("js123"), "JSESSIONID value not in stored contract");
+  // The contract must not include any field named 'cookie'
+  assert(!Object.prototype.hasOwnProperty.call(contract, "cookie"), "no cookie field on contract object");
+}
+
+async function testAC5d_manualSyncIncludesMessagingContract() {
+  console.log("\nAC5d: MANUAL_SYNC includes messaging_contract when previously captured");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.messagingContract = {
+    conversationsQueryId: "messengerConversations.live123",
+    messagesQueryId: "messengerMessages.live456",
+    endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
+    capturedAt: "2026-04-27T10:00:00.000Z",
+  };
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, "sync response is ok");
+
+  const syncCall = env.fetchLog.find((f) => f.url.includes("/sync"));
+  assert(!!syncCall, "POST /sync was called");
+  if (syncCall) {
+    const body = JSON.parse(syncCall.options.body);
+    assert(!!body.messaging_contract, "messaging_contract field present in sync payload");
+    assert(
+      body.messaging_contract.conversationsQueryId === "messengerConversations.live123",
+      "live conversationsQueryId forwarded to sync"
+    );
+    assert(
+      body.messaging_contract.messagesQueryId === "messengerMessages.live456",
+      "live messagesQueryId forwarded to sync"
+    );
+  }
+}
+
+async function testAC5e_manualSyncNullContractWhenNotCaptured() {
+  console.log("\nAC5e: MANUAL_SYNC sends messaging_contract: null when nothing captured");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  loadBackground(env);
+
+  await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  const syncCall = env.fetchLog.find((f) => f.url.includes("/sync"));
+  if (syncCall) {
+    const body = JSON.parse(syncCall.options.body);
+    assert(body.messaging_contract === null, "messaging_contract is null when not captured");
+  }
+}
+
 // ─── Run ────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -407,6 +544,11 @@ async function main() {
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_manualSyncThreadsBrowserContext();
   await testAC6_manualRefresh();
+  await testAC7_messagingContractConversations();
+  await testAC7b_messagingContractMessages();
+  await testAC7c_messagingContractNoSecrets();
+  await testAC5d_manualSyncIncludesMessagingContract();
+  await testAC5e_manualSyncNullContractWhenNotCaptured();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
   process.exit(failed > 0 ? 1 : 0);

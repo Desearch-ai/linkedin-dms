@@ -3,6 +3,7 @@
 
 const LINKEDIN_DOMAIN = "linkedin.com";
 const VOYAGER_API_PATTERN = "https://www.linkedin.com/voyager/api/*";
+const MESSAGING_GRAPHQL_PATH = "/voyagerMessagingGraphQL/graphql";
 
 const SERVICE_URL_DEFAULT = "http://localhost:8899";
 
@@ -17,6 +18,46 @@ async function getConfig() {
   return result;
 }
 
+// Capture the live messaging GraphQL request contract (queryId + variables shape)
+// from real LinkedIn browser traffic. Stores only metadata — never cookies or auth.
+async function captureMessagingContract(url) {
+  try {
+    const parsed = new URL(url);
+    const queryId = parsed.searchParams.get("queryId") || "";
+    const variablesRaw = parsed.searchParams.get("variables") || "";
+
+    if (!queryId) return;
+
+    // Extract key names only — shape without runtime identifying values.
+    const variablesShape = variablesRaw
+      .replace(/^\(|\)$/g, "")
+      .split(",")
+      .filter(Boolean)
+      .map((kv) => kv.split(":")[0].trim())
+      .filter(Boolean);
+
+    const current = await chrome.storage.local.get({ messagingContract: {} });
+    const contract = { ...(current.messagingContract || {}) };
+
+    if (queryId.startsWith("messengerConversations.")) {
+      contract.conversationsQueryId = queryId;
+      contract.conversationsVariablesShape = variablesShape;
+    } else if (queryId.startsWith("messengerMessages.")) {
+      contract.messagesQueryId = queryId;
+      contract.messagesVariablesShape = variablesShape;
+    } else {
+      return;
+    }
+
+    contract.endpointPath = parsed.pathname;
+    contract.capturedAt = new Date().toISOString();
+
+    await chrome.storage.local.set({ messagingContract: contract });
+  } catch (_) {
+    // best-effort; never propagate
+  }
+}
+
 async function getCapturedHeaders() {
   // Read latest captured browser headers so each backend call carries the
   // freshest fingerprint (see issue #54). Values are null until the header
@@ -26,6 +67,11 @@ async function getCapturedHeaders() {
     csrfToken: null,
   });
   return { x_li_track: xLiTrack, csrf_token: csrfToken };
+}
+
+async function getCapturedMessagingContract() {
+  const { messagingContract } = await chrome.storage.local.get({ messagingContract: null });
+  return messagingContract;
 }
 
 function buildServiceHeaders(config) {
@@ -144,9 +190,15 @@ async function registerAccount(config, cookies) {
 
 chrome.webRequest.onSendHeaders.addListener(
   async (details) => {
+    const url = details.url || "";
     const headers = details.requestHeaders || [];
     const track = headers.find((h) => (h.name || "").toLowerCase() === "x-li-track");
     const csrf = headers.find((h) => (h.name || "").toLowerCase() === "csrf-token");
+
+    // Record live messaging GraphQL contract (queryId + variables shape) from real traffic.
+    if (url.includes(MESSAGING_GRAPHQL_PATH)) {
+      await captureMessagingContract(url);
+    }
 
     if (!track && !csrf) return;
 
@@ -190,10 +242,11 @@ async function handleManualSync() {
   }
 
   const captured = await getCapturedHeaders();
+  const messagingContract = await getCapturedMessagingContract();
   const resp = await fetch(`${config.serviceUrl}/sync`, {
     method: "POST",
     headers: buildServiceHeaders(config),
-    body: JSON.stringify({ account_id: config.accountId, ...captured }),
+    body: JSON.stringify({ account_id: config.accountId, ...captured, messaging_contract: messagingContract }),
   });
 
   if (!resp.ok) {
