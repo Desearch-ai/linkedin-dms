@@ -29,6 +29,14 @@ def _normalize_jsessionid(value: Optional[str]) -> Optional[str]:
     return stripped if stripped else None
 
 
+def _normalize_header(value: Optional[str]) -> Optional[str]:
+    """Trim whitespace from a captured request-header value; empty -> None."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
 @dataclass(frozen=True)
 class AccountAuth:
     """LinkedIn auth material.
@@ -37,19 +45,30 @@ class AccountAuth:
 
     - li_at is usually the primary session cookie.
     - JSESSIONID is sometimes required for CSRF headers.
+    - x_li_track / csrf_token are browser-captured request-header values
+      forwarded by the Chrome extension so backend requests match the live
+      browser fingerprint (see issue #54). Both are optional; when absent,
+      the provider falls back to its built-in defaults.
 
     IMPORTANT: treat these as secrets; never log.
     """
 
     li_at: str
     jsessionid: Optional[str] = None
+    x_li_track: Optional[str] = None
+    csrf_token: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Normalize quoted JSESSIONID regardless of which input path created this instance.
         object.__setattr__(self, "jsessionid", _normalize_jsessionid(self.jsessionid))
+        object.__setattr__(self, "x_li_track", _normalize_header(self.x_li_track))
+        object.__setattr__(self, "csrf_token", _normalize_header(self.csrf_token))
 
     def __repr__(self) -> str:
-        return "AccountAuth(li_at='[REDACTED]', jsessionid='[REDACTED]')"
+        return (
+            "AccountAuth(li_at='[REDACTED]', jsessionid='[REDACTED]', "
+            "x_li_track='[REDACTED]', csrf_token='[REDACTED]')"
+        )
 
     def __str__(self) -> str:
         return self.__repr__()

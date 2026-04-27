@@ -160,6 +160,9 @@ async function testAC1_loads() {
 async function testAC2_newAccountRegistration() {
   console.log("\nAC2: Cookie capture registers new account (no accountId stored)");
   const env = buildEnv();
+  // Seed previously-captured headers so registration forwards them (issue #54).
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
+  env.storage.csrfToken = "ajax:CSRF123";
   // No accountId in storage → should call POST /accounts
   loadBackground(env);
 
@@ -180,6 +183,8 @@ async function testAC2_newAccountRegistration() {
     assert(body.li_at === "new-li-at-value", "li_at value passed correctly");
     assert(body.jsessionid === "fake-jsessionid-123", "JSESSIONID passed (quotes stripped)");
     assert(body.label === "chrome-extension", "label is 'chrome-extension'");
+    assert(body.x_li_track === '{"clientVersion":"1.13.42912"}', "x_li_track forwarded on registration");
+    assert(body.csrf_token === "ajax:CSRF123", "csrf_token forwarded on registration");
   }
   assert(env.storage.accountId === 42, "accountId stored after registration");
   assert(env.storage.lastStatus === "connected", "status set to connected");
@@ -189,6 +194,8 @@ async function testAC3_cookieRefresh() {
   console.log("\nAC3: Cookie change triggers POST /accounts/refresh");
   const env = buildEnv();
   env.storage.accountId = 1; // Existing account
+  env.storage.xLiTrack = "TRACK_FOR_REFRESH";
+  env.storage.csrfToken = "CSRF_FOR_REFRESH";
   loadBackground(env);
 
   const cookieListener = env.listeners.cookieChanged[0];
@@ -207,8 +214,31 @@ async function testAC3_cookieRefresh() {
     assert(body.account_id === 1, "account_id passed correctly");
     assert(body.li_at === "refreshed-li-at", "updated li_at value passed");
     assert(body.jsessionid === "fake-jsessionid-123", "JSESSIONID included");
+    assert(body.x_li_track === "TRACK_FOR_REFRESH", "x_li_track forwarded on refresh");
+    assert(body.csrf_token === "CSRF_FOR_REFRESH", "csrf_token forwarded on refresh");
   }
   assert(env.storage.lastStatus === "connected", "status set to connected");
+}
+
+async function testAC3d_refreshWithoutCapturedHeaders() {
+  console.log("\nAC3d: Refresh sends null x_li_track/csrf_token when nothing captured");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  loadBackground(env);
+
+  env.listeners.cookieChanged[0]({
+    cookie: { domain: ".linkedin.com", name: "li_at", value: "x" },
+    removed: false,
+  });
+  await new Promise((r) => setTimeout(r, 50));
+
+  const refreshCall = env.fetchLog.find(f => f.url.includes("/accounts/refresh"));
+  assert(!!refreshCall, "POST /accounts/refresh was called");
+  if (refreshCall) {
+    const body = JSON.parse(refreshCall.options.body);
+    assert(body.x_li_track === null, "x_li_track is null when not captured");
+    assert(body.csrf_token === null, "csrf_token is null when not captured");
+  }
 }
 
 async function testAC3_ignoresRemovedCookie() {
@@ -275,6 +305,8 @@ async function testAC5_manualSync() {
   console.log("\nAC5: MANUAL_SYNC triggers POST /sync");
   const env = buildEnv();
   env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
   loadBackground(env);
 
   const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
@@ -287,6 +319,23 @@ async function testAC5_manualSync() {
   if (syncCall) {
     const body = JSON.parse(syncCall.options.body);
     assert(body.account_id === 1, "account_id passed to sync");
+    assert(body.x_li_track === "SYNC_TRACK", "x_li_track forwarded on manual sync");
+    assert(body.csrf_token === "SYNC_CSRF", "csrf_token forwarded on manual sync");
+  }
+}
+
+async function testAC5c_manualSyncWithoutCapturedHeaders() {
+  console.log("\nAC5c: MANUAL_SYNC sends null when nothing captured yet");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  loadBackground(env);
+
+  await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
+  if (syncCall) {
+    const body = JSON.parse(syncCall.options.body);
+    assert(body.x_li_track === null, "x_li_track is null when not captured");
+    assert(body.csrf_token === null, "csrf_token is null when not captured");
   }
 }
 
@@ -328,26 +377,6 @@ async function testAC5c_manualSyncThreadsBrowserContext() {
   }
 }
 
-async function testAC5d_manualSyncOmitsContextWhenNotCaptured() {
-  console.log("\nAC5d: MANUAL_SYNC omits browser context fields when not yet captured");
-  const env = buildEnv();
-  env.storage.accountId = 1;
-  // xLiTrack and csrfToken are not set in storage
-  loadBackground(env);
-
-  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
-  assert(resp.ok === true, "sync response is ok");
-
-  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
-  assert(!!syncCall, "POST /sync was called");
-  if (syncCall) {
-    const body = JSON.parse(syncCall.options.body);
-    assert(body.account_id === 1, "account_id present");
-    assert(!("x_li_track" in body), "x_li_track absent when not captured");
-    assert(!("csrf_token" in body), "csrf_token absent when not captured");
-  }
-}
-
 async function testAC6_manualRefresh() {
   console.log("\nAC6: MANUAL_REFRESH triggers cookie refresh");
   const env = buildEnv();
@@ -369,13 +398,14 @@ async function main() {
   await testAC1_loads();
   await testAC2_newAccountRegistration();
   await testAC3_cookieRefresh();
+  await testAC3d_refreshWithoutCapturedHeaders();
   await testAC3_ignoresRemovedCookie();
   await testAC3_ignoresNonLinkedIn();
   await testAC4_headerCapture();
   await testAC5_manualSync();
+  await testAC5c_manualSyncWithoutCapturedHeaders();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_manualSyncThreadsBrowserContext();
-  await testAC5d_manualSyncOmitsContextWhenNotCaptured();
   await testAC6_manualRefresh();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

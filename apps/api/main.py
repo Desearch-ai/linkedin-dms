@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+from dataclasses import replace
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -52,6 +53,21 @@ class AuthCheckResponse(BaseModel):
     error: Optional[str] = None
 
 
+_X_LI_TRACK_DESC = "Browser-captured x-li-track header value (from Chrome extension)"
+_CSRF_TOKEN_DESC = "Browser-captured csrf-token header value (from Chrome extension)"
+
+
+def _merge_browser_context(
+    auth: AccountAuth,
+    x_li_track: str | None,
+    csrf_token: str | None,
+) -> AccountAuth:
+    """Attach captured header values to an AccountAuth without mutating the caller."""
+    if x_li_track is None and csrf_token is None:
+        return auth
+    return replace(auth, x_li_track=x_li_track, csrf_token=csrf_token)
+
+
 class AccountCreateIn(BaseModel):
     label: str = Field(..., description="Human label, e.g. 'sales-1'")
     li_at: str | None = Field(None, description="LinkedIn li_at cookie value (required if cookies not provided)")
@@ -61,6 +77,8 @@ class AccountCreateIn(BaseModel):
         description="Cookie header string, e.g. 'li_at=xxx; JSESSIONID=yyy'. Overrides li_at/jsessionid fields.",
     )
     proxy_url: str | None = Field(None, description="Optional proxy URL")
+    x_li_track: str | None = Field(None, description=_X_LI_TRACK_DESC)
+    csrf_token: str | None = Field(None, description=_CSRF_TOKEN_DESC)
 
     @model_validator(mode="after")
     def require_auth(self) -> AccountCreateIn:
@@ -70,8 +88,10 @@ class AccountCreateIn(BaseModel):
 
     def to_account_auth(self) -> AccountAuth:
         if self.cookies:
-            return cookies_to_account_auth(self.cookies)
-        return AccountAuth(li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid)
+            base = cookies_to_account_auth(self.cookies)
+        else:
+            base = AccountAuth(li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid)
+        return _merge_browser_context(base, self.x_li_track, self.csrf_token)
 
 
 class AccountRefreshIn(BaseModel):
@@ -82,6 +102,8 @@ class AccountRefreshIn(BaseModel):
         None,
         description="Cookie header string, e.g. 'li_at=xxx; JSESSIONID=yyy'. Overrides li_at/jsessionid fields.",
     )
+    x_li_track: str | None = Field(None, description=_X_LI_TRACK_DESC)
+    csrf_token: str | None = Field(None, description=_CSRF_TOKEN_DESC)
 
     @model_validator(mode="after")
     def require_auth(self) -> AccountRefreshIn:
@@ -91,8 +113,10 @@ class AccountRefreshIn(BaseModel):
 
     def to_account_auth(self) -> AccountAuth:
         if self.cookies:
-            return cookies_to_account_auth(self.cookies)
-        return AccountAuth(li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid)
+            base = cookies_to_account_auth(self.cookies)
+        else:
+            base = AccountAuth(li_at=validate_li_at(self.li_at or ""), jsessionid=self.jsessionid)
+        return _merge_browser_context(base, self.x_li_track, self.csrf_token)
 
 
 class SendIn(BaseModel):
@@ -100,8 +124,8 @@ class SendIn(BaseModel):
     recipient: str = Field(..., min_length=1, description="Recipient id (profile URN or conversation id)")
     text: str = Field(..., min_length=1, max_length=8000, description="Message body")
     idempotency_key: str | None = None
-    x_li_track: str | None = Field(None, description="Extension-captured x-li-track header value")
-    csrf_token: str | None = Field(None, description="Extension-captured csrf-token header value")
+    x_li_track: str | None = Field(None, description=_X_LI_TRACK_DESC)
+    csrf_token: str | None = Field(None, description=_CSRF_TOKEN_DESC)
 
 
 class SyncIn(BaseModel):
@@ -119,8 +143,8 @@ class SyncIn(BaseModel):
     delay_between_pages_s: float = Field(
         1.5, ge=0, le=60, description="Seconds to pause between fetch_messages pages",
     )
-    x_li_track: str | None = Field(None, description="Extension-captured x-li-track header value")
-    csrf_token: str | None = Field(None, description="Extension-captured csrf-token header value")
+    x_li_track: str | None = Field(None, description=_X_LI_TRACK_DESC)
+    csrf_token: str | None = Field(None, description=_CSRF_TOKEN_DESC)
 
 
 @app.get("/health")
@@ -142,15 +166,31 @@ def create_account(body: AccountCreateIn):
 
 @app.post("/accounts/refresh", dependencies=[Depends(require_api_auth)])
 def refresh_account(body: AccountRefreshIn):
-    """Update session cookies for an existing account without recreating it."""
+    """Update session cookies for an existing account without recreating it.
+
+    Preserves previously persisted browser-context headers (``x_li_track`` /
+    ``csrf_token``) when the refresh payload does not supply fresh values,
+    so callers that only rotate cookies don't wipe the persisted fallback
+    this account relies on (issue #54).
+    """
     try:
         auth = body.to_account_auth()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=redact_string(str(exc)))
     try:
-        storage.update_account_auth(body.account_id, auth)
+        existing = storage.get_account_auth(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
+
+    preserved: dict[str, str] = {}
+    if auth.x_li_track is None and existing.x_li_track:
+        preserved["x_li_track"] = existing.x_li_track
+    if auth.csrf_token is None and existing.csrf_token:
+        preserved["csrf_token"] = existing.csrf_token
+    if preserved:
+        auth = replace(auth, **preserved)
+
+    storage.update_account_auth(body.account_id, auth)
     logger.info("Account refreshed: %s", redact_for_log({"account_id": body.account_id}))
     return {"ok": True, "account_id": body.account_id}
 
@@ -202,6 +242,8 @@ def sync_account(body: SyncIn):
             limit_per_thread=body.limit_per_thread,
             max_pages_per_thread=body.max_pages_per_thread,
             sync_config=sync_config,
+            x_li_track=body.x_li_track,
+            csrf_token=body.csrf_token,
         )
         return {
             "ok": True,
@@ -251,6 +293,8 @@ def send_message(body: SendIn):
             recipient=body.recipient,
             text=body.text,
             idempotency_key=body.idempotency_key,
+            x_li_track=body.x_li_track,
+            csrf_token=body.csrf_token,
         )
         return {
             "ok": True,

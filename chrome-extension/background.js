@@ -17,6 +17,17 @@ async function getConfig() {
   return result;
 }
 
+async function getCapturedHeaders() {
+  // Read latest captured browser headers so each backend call carries the
+  // freshest fingerprint (see issue #54). Values are null until the header
+  // capture listener observes a Voyager request.
+  const { xLiTrack, csrfToken } = await chrome.storage.local.get({
+    xLiTrack: null,
+    csrfToken: null,
+  });
+  return { x_li_track: xLiTrack, csrf_token: csrfToken };
+}
+
 function buildServiceHeaders(config) {
   const headers = { "Content-Type": "application/json" };
   const token = (config.apiToken || "").trim();
@@ -78,10 +89,12 @@ chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
 });
 
 async function pushRefresh(config, cookies) {
+  const captured = await getCapturedHeaders();
   const payload = {
     account_id: config.accountId,
     li_at: cookies.li_at,
     jsessionid: cookies.JSESSIONID || null,
+    ...captured,
   };
 
   const resp = await fetch(`${config.serviceUrl}/accounts/refresh`, {
@@ -100,10 +113,12 @@ async function pushRefresh(config, cookies) {
 }
 
 async function registerAccount(config, cookies) {
+  const captured = await getCapturedHeaders();
   const payload = {
     label: "chrome-extension",
     li_at: cookies.li_at,
     jsessionid: cookies.JSESSIONID || null,
+    ...captured,
   };
 
   const resp = await fetch(`${config.serviceUrl}/accounts`, {
@@ -174,15 +189,11 @@ async function handleManualSync() {
     throw new Error("No account registered. Log in to LinkedIn first.");
   }
 
-  const captured = await chrome.storage.local.get({ xLiTrack: null, csrfToken: null });
-  const payload = { account_id: config.accountId };
-  if (captured.xLiTrack) payload.x_li_track = captured.xLiTrack;
-  if (captured.csrfToken) payload.csrf_token = captured.csrfToken;
-
+  const captured = await getCapturedHeaders();
   const resp = await fetch(`${config.serviceUrl}/sync`, {
     method: "POST",
     headers: buildServiceHeaders(config),
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ account_id: config.accountId, ...captured }),
   });
 
   if (!resp.ok) {

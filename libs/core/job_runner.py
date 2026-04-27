@@ -57,6 +57,8 @@ def run_sync(
     limit_per_thread: int = 50,
     max_pages_per_thread: int | None = 1,
     sync_config: SyncConfig | None = None,
+    x_li_track: str | None = None,
+    csrf_token: str | None = None,
 ) -> SyncResult:
     """Sync threads and messages from provider into storage.
 
@@ -67,11 +69,17 @@ def run_sync(
         limit_per_thread: Max messages per fetch_messages call.
         max_pages_per_thread: Max pages per thread (1 = MVP one page). None = exhaust cursor.
         sync_config: Rate-limit delay configuration. Uses defaults if not provided.
+        x_li_track: Optional fresh browser-captured ``x-li-track`` header value
+            forwarded by the Chrome extension. Overrides any persisted value
+            for the duration of this call. Ignored when empty.
+        csrf_token: Optional fresh browser-captured ``csrf-token`` header value.
+            Same semantics as ``x_li_track``.
 
     Returns:
         SyncResult with counts. Duplicates are skipped and counted separately.
     """
     cfg = sync_config or SyncConfig()
+    provider.update_browser_context(x_li_track=x_li_track, csrf_token=csrf_token)
     threads = provider.list_threads()
     synced_threads = 0
     messages_inserted = 0
@@ -144,6 +152,8 @@ def run_send(
     recipient: str,
     text: str,
     idempotency_key: str | None,
+    x_li_track: str | None = None,
+    csrf_token: str | None = None,
 ) -> SendResult:
     """Send one message via provider with durable idempotency.
 
@@ -157,6 +167,7 @@ def run_send(
     On success the outbound message is also archived in the ``messages``
     table (existing behavior).
     """
+    provider.update_browser_context(x_li_track=x_li_track, csrf_token=csrf_token)
     send_id, existing = storage.create_or_get_outbound_send(
         account_id=account_id,
         idempotency_key=idempotency_key,
