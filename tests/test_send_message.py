@@ -63,13 +63,15 @@ def _make_provider(auth=None, proxy=None):
     return LinkedInProvider(auth=auth or SAMPLE_AUTH, proxy=proxy)
 
 
-def _make_mock_response(status_code=200, json_data=None):
+def _make_mock_response(status_code=200, json_data=None, headers=None):
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = status_code
+    resp.headers = headers or {}
+    resp.request = httpx.Request("POST", _MESSAGING_URL)
     resp.json.return_value = json_data or SAMPLE_LINKEDIN_SUCCESS_RESPONSE
     if status_code >= 400:
         resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-            f"HTTP {status_code}", request=MagicMock(), response=resp
+            f"HTTP {status_code}", request=resp.request, response=resp
         )
     else:
         resp.raise_for_status.return_value = None
@@ -406,9 +408,10 @@ class TestSendMessageRateLimiting:
         client.post.return_value = _make_mock_response(429)
 
         provider = _make_provider()
-        with pytest.raises(RuntimeError, match="Rate-limited"):
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
             provider.send_message(recipient=SAMPLE_RECIPIENT, text="Hi")
 
+        assert exc_info.value.response.status_code == 429
         assert client.post.call_count == 6  # 5 retries + 1 final that triggers raise
 
 

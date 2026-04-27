@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+
+import httpx
 import os
 import secrets
 from dataclasses import replace
@@ -51,6 +53,58 @@ def require_api_auth(authorization: str | None = Header(default=None)) -> None:
 class AuthCheckResponse(BaseModel):
     status: str
     error: Optional[str] = None
+
+
+def _provider_http_exception(exc: httpx.HTTPStatusError | ConnectionError) -> HTTPException:
+    if isinstance(exc, ConnectionError):
+        return HTTPException(
+            status_code=503,
+            detail=(
+                "LinkedIn upstream network error — retry shortly. "
+                "If this persists, refresh via POST /accounts/refresh and try again."
+            ),
+        )
+
+    response = exc.response
+    status_code = response.status_code if response is not None else None
+    safe_detail = redact_string(str(exc))
+
+    if status_code in (401, 403):
+        if status_code == 403:
+            detail = (
+                "LinkedIn rejected the session — re-authenticate via POST /accounts/refresh and retry."
+            )
+        else:
+            detail = (
+                "LinkedIn session expired — re-authenticate via POST /accounts/refresh and retry."
+            )
+        return HTTPException(status_code=401, detail=detail)
+
+    if status_code in (429, 999):
+        headers: dict[str, str] = {}
+        retry_after = response.headers.get("Retry-After") if response is not None else None
+        if retry_after:
+            headers["Retry-After"] = retry_after
+        detail = "LinkedIn upstream rate limit reached — retry later."
+        if retry_after:
+            detail = f"{detail} Retry-After: {retry_after}s."
+        return HTTPException(status_code=429, detail=detail, headers=headers or None)
+
+    if status_code in (400, 404):
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "LinkedIn messaging contract drift detected upstream — refresh the request contract and retry."
+            ),
+        )
+
+    return HTTPException(
+        status_code=502,
+        detail=(
+            "LinkedIn upstream request failed — retry shortly. "
+            f"Upstream detail: {safe_detail}"
+        ),
+    )
 
 
 _X_LI_TRACK_DESC = "Browser-captured x-li-track header value (from Chrome extension)"
@@ -261,6 +315,8 @@ def sync_account(body: SyncIn):
             status_code=401,
             detail=detail,
         ) from exc
+    except (httpx.HTTPStatusError, ConnectionError) as exc:
+        raise _provider_http_exception(exc) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,
@@ -312,6 +368,8 @@ def send_message(body: SendIn):
             status_code=401,
             detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
         ) from exc
+    except (httpx.HTTPStatusError, ConnectionError) as exc:
+        raise _provider_http_exception(exc) from exc
     except NotImplementedError:
         raise HTTPException(
             status_code=501,

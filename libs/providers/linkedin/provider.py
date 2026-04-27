@@ -890,8 +890,8 @@ class LinkedInProvider:
         Raises:
           PermissionError: on 401 (session expired) or 403 (forbidden).
           ConnectionError: after exhausting network retries.
-          RuntimeError: after exhausting rate-limit back-off retries.
-          httpx.HTTPStatusError: on unexpected HTTP errors.
+          httpx.HTTPStatusError: after exhausting rate-limit back-off retries
+              or on unexpected HTTP errors.
         """
         if idempotency_key and idempotency_key in self._sent_keys:
             logger.info("Idempotency cache hit — returning cached message id")
@@ -955,12 +955,18 @@ class LinkedInProvider:
                 self.rate_limit_encountered = True
                 rate_limit_hits += 1
                 if rate_limit_hits > _MAX_RATE_LIMIT_RETRIES:
-                    raise RuntimeError(
-                        f"Rate-limited {rate_limit_hits} times, giving up"
+                    raise httpx.HTTPStatusError(
+                        str(resp.status_code), request=resp.request, response=resp,
                     )
                 backoff = min(
                     _BACKOFF_START_S * (2 ** (rate_limit_hits - 1)), _BACKOFF_MAX_S
                 )
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        backoff = max(backoff, float(retry_after))
+                    except (TypeError, ValueError):
+                        pass
                 logger.warning(
                     "Rate-limit: HTTP %d, account_id=%s, attempt %d/%d, backoff %.0fs",
                     resp.status_code,
