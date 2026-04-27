@@ -93,8 +93,10 @@ btnSync.addEventListener("click", async () => {
     const resp = await chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
     if (resp.ok) {
       const d = resp.data;
+      const dupes = d.messages_skipped_duplicate ?? 0;
+      const rate = d.rate_limited ? " (rate-limited)" : "";
       showResult(
-        `Synced ${d.synced_threads} threads, ${d.messages_inserted} new messages.`
+        `Synced ${d.synced_threads} threads, ${d.messages_inserted} new, ${dupes} duplicates skipped${rate}.`,
       );
     } else {
       showResult(resp.error || "Sync failed.", true);

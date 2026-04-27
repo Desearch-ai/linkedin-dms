@@ -7,8 +7,10 @@
  *   AC2 – cookie capture registers a new account via POST /accounts
  *   AC3 – cookie change on existing account triggers POST /accounts/refresh
  *   AC4 – header capture stores xLiTrack / csrfToken
- *   AC5 – MANUAL_SYNC message triggers POST /sync
- *   AC6 – MANUAL_REFRESH message triggers refresh or register
+ *   AC5 – MANUAL_SYNC reads LinkedIn from the browser and POSTs /sync/ingest
+ *   AC6 – MANUAL_REFRESH triggers refresh or register
+ *   AC7 – messaging contract capture from real traffic
+ *   AC8 – MANUAL_SYNC fails visibly without contract / csrf
  */
 
 import { readFileSync } from "fs";
@@ -29,9 +31,18 @@ function assert(cond, label) {
   }
 }
 
+const FRESH_CONTRACT = {
+  conversationsQueryId: "messengerConversations.live123",
+  messagesQueryId: "messengerMessages.live456",
+  conversationsVariablesShape: ["mailboxUrn", "count"],
+  messagesVariablesShape: ["conversationUrn", "count"],
+  endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
+  capturedAt: new Date().toISOString(),
+};
+
 // ─── Build mock chrome + fetch environment ──────────────────────────────────
 
-function buildEnv() {
+function buildEnv({ linkedinResponses } = {}) {
   const storage = {};
   const listeners = {
     cookieChanged: [],
@@ -46,7 +57,6 @@ function buildEnv() {
         addListener: (fn) => listeners.cookieChanged.push(fn),
       },
       get: (query, cb) => {
-        // Return a fake JSESSIONID when asked
         if (query.name === "JSESSIONID") {
           if (cb) cb({ value: '"fake-jsessionid-123"' });
           else return Promise.resolve({ value: '"fake-jsessionid-123"' });
@@ -93,28 +103,130 @@ function buildEnv() {
     },
   };
 
-  // Mock fetch
+  const lr = linkedinResponses || {};
+
+  // Mock fetch — handles LinkedIn voyager + service URLs.
   const fakeFetch = (url, options) => {
     fetchLog.push({ url, options });
-    // Return different responses based on URL
-    if (url.includes("/accounts/refresh")) {
+    const u = String(url);
+
+    if (u.startsWith("https://www.linkedin.com/voyager/api/me")) {
+      const me = lr.me === undefined ? { plainId: "42" } : lr.me;
+      if (me === "__error__") {
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          json: () => Promise.resolve({}),
+          text: () => Promise.resolve("expired"),
+        });
+      }
       return Promise.resolve({
         ok: true,
+        status: 200,
+        json: () => Promise.resolve(me),
+        text: () => Promise.resolve(JSON.stringify(me)),
+      });
+    }
+
+    if (u.includes("/voyagerMessagingGraphQL/graphql")) {
+      const isConv = u.includes("queryId=messengerConversations");
+      const isMsg = u.includes("queryId=messengerMessages");
+      let body;
+      if (isConv) {
+        body = lr.conversations === undefined
+          ? {
+              data: {
+                messengerConversationsBySyncToken: {
+                  elements: [
+                    {
+                      entityUrn: "urn:li:msg_conversation:1",
+                      conversationName: null,
+                      conversationParticipants: [
+                        { participantProfile: { entityUrn: "urn:li:fsd_profile:99", firstName: "Alice", lastName: "Example" } },
+                      ],
+                    },
+                    {
+                      entityUrn: "urn:li:msg_conversation:2",
+                      conversationName: "Group Chat",
+                      conversationParticipants: [],
+                    },
+                  ],
+                  metadata: {},
+                },
+              },
+            }
+          : lr.conversations;
+      } else if (isMsg) {
+        body = lr.messages === undefined
+          ? {
+              data: {
+                messengerMessagesBySyncToken: {
+                  elements: [
+                    {
+                      entityUrn: "urn:li:event:1",
+                      sender: { participantProfile: { entityUrn: "urn:li:fsd_profile:99", firstName: "Alice", lastName: "Example" } },
+                      eventContent: { attributedBody: { text: "Hi there" } },
+                      createdAt: 1714200000000,
+                    },
+                    {
+                      entityUrn: "urn:li:event:2",
+                      sender: { participantProfile: { entityUrn: "urn:li:fsd_profile:42", firstName: "Me", lastName: "" } },
+                      eventContent: { attributedBody: { text: "Hello" } },
+                      createdAt: 1714200060000,
+                    },
+                  ],
+                },
+              },
+            }
+          : lr.messages;
+      } else {
+        body = {};
+      }
+      if (body && body.__error__) {
+        return Promise.resolve({
+          ok: false,
+          status: body.__error__,
+          json: () => Promise.resolve({}),
+          text: () => Promise.resolve("err"),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(body),
+        text: () => Promise.resolve(JSON.stringify(body)),
+      });
+    }
+
+    if (u.includes("/sync/ingest")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          ok: true,
+          synced_threads: 2,
+          messages_inserted: 4,
+          messages_skipped_duplicate: 0,
+          pages_fetched: 3,
+          rate_limited: false,
+        }),
+        text: () => Promise.resolve("ok"),
+      });
+    }
+
+    if (u.includes("/accounts/refresh")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
         json: () => Promise.resolve({ ok: true, account_id: 1 }),
         text: () => Promise.resolve("ok"),
       });
     }
-    if (url.includes("/accounts")) {
+    if (u.includes("/accounts")) {
       return Promise.resolve({
         ok: true,
+        status: 200,
         json: () => Promise.resolve({ account_id: 42 }),
-        text: () => Promise.resolve("ok"),
-      });
-    }
-    if (url.includes("/sync")) {
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ ok: true, synced_threads: 3, messages_inserted: 15, messages_skipped_duplicate: 0, pages_fetched: 3 }),
         text: () => Promise.resolve("ok"),
       });
     }
@@ -126,20 +238,42 @@ function buildEnv() {
 
 function loadBackground(env) {
   const code = readFileSync("chrome-extension/background.js", "utf8");
+  const consoleCalls = [];
+  const recordingConsole = {
+    log: (...args) => { consoleCalls.push(["log", ...args]); console.log(...args); },
+    info: (...args) => { consoleCalls.push(["info", ...args]); console.info(...args); },
+    warn: (...args) => { consoleCalls.push(["warn", ...args]); console.warn(...args); },
+    error: (...args) => { consoleCalls.push(["error", ...args]); console.error(...args); },
+    debug: (...args) => { consoleCalls.push(["debug", ...args]); },
+  };
+  env.consoleCalls = consoleCalls;
   const ctx = createContext({
     chrome: env.chrome,
     fetch: env.fakeFetch,
-    console,
+    console: recordingConsole,
     Promise,
     Date,
     JSON,
     Error,
     setTimeout,
-    URL, // needed for URL parsing in captureMessagingContract
+    URL,
+    encodeURIComponent,
   });
   const script = new Script(code, { filename: "background.js" });
   script.runInContext(ctx);
   return ctx;
+}
+
+function findIngestCall(env) {
+  return env.fetchLog.find((f) => f.url.includes("/sync/ingest"));
+}
+
+function findLegacySyncCall(env) {
+  return env.fetchLog.find(
+    (f) =>
+      (f.url.endsWith("/sync") || f.url.match(/\/sync(\?|$)/)) &&
+      !f.url.includes("/sync/ingest"),
+  );
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -161,14 +295,11 @@ async function testAC1_loads() {
 async function testAC2_newAccountRegistration() {
   console.log("\nAC2: Cookie capture registers new account (no accountId stored)");
   const env = buildEnv();
-  // Seed previously-captured headers so registration forwards them (issue #54).
   env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
   env.storage.csrfToken = "ajax:CSRF123";
-  // No accountId in storage → should call POST /accounts
   loadBackground(env);
 
   const cookieListener = env.listeners.cookieChanged[0];
-  // Simulate li_at cookie change
   await new Promise((resolve) => {
     cookieListener({
       cookie: { domain: ".linkedin.com", name: "li_at", value: "new-li-at-value" },
@@ -177,7 +308,7 @@ async function testAC2_newAccountRegistration() {
     setTimeout(resolve, 50);
   });
 
-  const accountCall = env.fetchLog.find(f => f.url.includes("/accounts") && !f.url.includes("/refresh"));
+  const accountCall = env.fetchLog.find(f => f.url.endsWith("/accounts"));
   assert(!!accountCall, "POST /accounts was called");
   if (accountCall) {
     const body = JSON.parse(accountCall.options.body);
@@ -194,7 +325,7 @@ async function testAC2_newAccountRegistration() {
 async function testAC3_cookieRefresh() {
   console.log("\nAC3: Cookie change triggers POST /accounts/refresh");
   const env = buildEnv();
-  env.storage.accountId = 1; // Existing account
+  env.storage.accountId = 1;
   env.storage.xLiTrack = "TRACK_FOR_REFRESH";
   env.storage.csrfToken = "CSRF_FOR_REFRESH";
   loadBackground(env);
@@ -278,7 +409,6 @@ async function testAC4_headerCapture() {
   const headerListener = env.listeners.onSendHeaders[0];
   assert(headerListener.filter.urls[0] === "https://www.linkedin.com/voyager/api/*", "filter matches voyager API pattern");
 
-  // Simulate a request with both headers
   await headerListener.fn({
     requestHeaders: [
       { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
@@ -291,7 +421,6 @@ async function testAC4_headerCapture() {
   assert(env.storage.csrfToken === "ajax:abc123", "csrfToken stored");
   assert(!!env.storage.headersUpdatedAt, "headersUpdatedAt stored");
 
-  // Simulate partial update: only one header present (case-insensitive name)
   await headerListener.fn({
     requestHeaders: [
       { name: "X-LI-TRACK", value: '{"clientVersion":"1.13.42913"}' },
@@ -302,79 +431,100 @@ async function testAC4_headerCapture() {
   assert(env.storage.csrfToken === "ajax:abc123", "csrfToken preserved when not present in later request");
 }
 
-async function testAC5_manualSync() {
-  console.log("\nAC5: MANUAL_SYNC triggers POST /sync");
+async function testAC5_manualSyncReadsLinkedInAndIngests() {
+  console.log("\nAC5: MANUAL_SYNC reads LinkedIn from the browser and POSTs /sync/ingest");
   const env = buildEnv();
   env.storage.accountId = 1;
   env.storage.xLiTrack = "SYNC_TRACK";
   env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = FRESH_CONTRACT;
   loadBackground(env);
 
   const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
-  assert(resp.ok === true, "sync response is ok");
-  assert(resp.data.synced_threads === 3, "sync result contains synced_threads");
-  assert(resp.data.messages_inserted === 15, "sync result contains messages_inserted");
-
-  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
-  assert(!!syncCall, "POST /sync was called");
-  if (syncCall) {
-    const body = JSON.parse(syncCall.options.body);
-    assert(body.account_id === 1, "account_id passed to sync");
-    assert(body.x_li_track === "SYNC_TRACK", "x_li_track forwarded on manual sync");
-    assert(body.csrf_token === "SYNC_CSRF", "csrf_token forwarded on manual sync");
+  assert(resp.ok === true, `sync response is ok (got: ${JSON.stringify(resp)})`);
+  if (resp.ok) {
+    assert(resp.data.synced_threads === 2, "ingest result contains synced_threads");
+    assert(resp.data.messages_inserted === 4, "ingest result contains messages_inserted");
+    assert(resp.data.messages_skipped_duplicate === 0, "ingest result contains messages_skipped_duplicate");
   }
-}
 
-async function testAC5c_manualSyncWithoutCapturedHeaders() {
-  console.log("\nAC5c: MANUAL_SYNC sends null when nothing captured yet");
-  const env = buildEnv();
-  env.storage.accountId = 1;
-  loadBackground(env);
+  const meCall = env.fetchLog.find(f => f.url.startsWith("https://www.linkedin.com/voyager/api/me"));
+  assert(!!meCall, "extension fetched LinkedIn /voyager/api/me directly");
 
-  await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
-  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
-  if (syncCall) {
-    const body = JSON.parse(syncCall.options.body);
-    assert(body.x_li_track === null, "x_li_track is null when not captured");
-    assert(body.csrf_token === null, "csrf_token is null when not captured");
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "extension fetched conversations from LinkedIn GraphQL");
+  if (convCall) {
+    assert(convCall.url.includes(FRESH_CONTRACT.conversationsQueryId), "conversations queryId from captured contract");
+  }
+
+  const msgCalls = env.fetchLog.filter(f => f.url.includes("queryId=messengerMessages"));
+  assert(msgCalls.length >= 1, "extension fetched at least one messages page from LinkedIn GraphQL");
+  if (msgCalls.length >= 1) {
+    assert(msgCalls[0].url.includes(FRESH_CONTRACT.messagesQueryId), "messages queryId from captured contract");
+  }
+
+  const ingestCall = findIngestCall(env);
+  assert(!!ingestCall, "POST /sync/ingest was called");
+  const legacy = findLegacySyncCall(env);
+  assert(!legacy, "legacy POST /sync was NOT called for manual Sync Now");
+
+  if (ingestCall) {
+    const body = JSON.parse(ingestCall.options.body);
+    assert(body.account_id === 1, "account_id in ingest payload");
+    assert(Array.isArray(body.threads), "threads array present in ingest payload");
+    assert(body.threads.length === 2, "two threads from mocked LinkedIn response");
+    const t = body.threads[0];
+    assert(typeof t.platform_thread_id === "string" && t.platform_thread_id.length > 0, "thread platform_thread_id present");
+    assert(Array.isArray(t.messages), "thread.messages array present");
+    if (t.messages.length) {
+      const m = t.messages[0];
+      assert(typeof m.platform_message_id === "string", "message platform_message_id present");
+      assert(m.direction === "in" || m.direction === "out", "message direction is 'in' or 'out'");
+      assert(typeof m.sent_at === "string", "message sent_at is an ISO string");
+    }
+    assert(typeof body.pages_fetched === "number" && body.pages_fetched >= 1, "pages_fetched count present");
+    assert(body.rate_limited === false, "rate_limited flag included");
+    assert(!!body.messaging_contract, "messaging_contract metadata forwarded");
+    assert(body.messaging_contract.conversationsQueryId === FRESH_CONTRACT.conversationsQueryId, "live conversationsQueryId forwarded");
   }
 }
 
 async function testAC5b_manualSyncIncludesBearerToken() {
-  console.log("\nAC5b: MANUAL_SYNC includes Authorization when apiToken is configured");
+  console.log("\nAC5b: MANUAL_SYNC includes Authorization on /sync/ingest when apiToken configured");
   const env = buildEnv();
   env.storage.accountId = 1;
   env.storage.apiToken = "local-api-token";
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = FRESH_CONTRACT;
   loadBackground(env);
 
   const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
   assert(resp.ok === true, "sync response is ok");
 
-  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
-  assert(!!syncCall, "POST /sync was called");
-  if (syncCall) {
-    assert(syncCall.options.headers.Authorization === "Bearer local-api-token", "Authorization header included");
+  const ingestCall = findIngestCall(env);
+  assert(!!ingestCall, "POST /sync/ingest was called");
+  if (ingestCall) {
+    assert(ingestCall.options.headers.Authorization === "Bearer local-api-token", "Authorization header included on ingest");
   }
 }
 
-async function testAC5c_manualSyncThreadsBrowserContext() {
-  console.log("\nAC5c: MANUAL_SYNC threads captured x_li_track and csrf_token into payload");
+async function testAC5c_extensionDirectionForMyMessages() {
+  console.log("\nAC5c: messages from my profileId are normalized direction='out'");
   const env = buildEnv();
   env.storage.accountId = 1;
-  env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
-  env.storage.csrfToken = "ajax:abc123";
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = FRESH_CONTRACT;
   loadBackground(env);
 
   const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
   assert(resp.ok === true, "sync response is ok");
 
-  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
-  assert(!!syncCall, "POST /sync was called");
-  if (syncCall) {
-    const body = JSON.parse(syncCall.options.body);
-    assert(body.account_id === 1, "account_id passed to sync");
-    assert(body.x_li_track === '{"clientVersion":"1.13.42912"}', "x_li_track threaded into sync payload");
-    assert(body.csrf_token === "ajax:abc123", "csrf_token threaded into sync payload");
+  const ingestCall = findIngestCall(env);
+  if (ingestCall) {
+    const body = JSON.parse(ingestCall.options.body);
+    const allMessages = body.threads.flatMap((t) => t.messages);
+    const outMessages = allMessages.filter((m) => m.direction === "out");
+    assert(outMessages.length >= 1, "at least one message normalized as direction='out' for my profile id");
   }
 }
 
@@ -478,52 +628,86 @@ async function testAC7c_messagingContractNoSecrets() {
   const contractStr = JSON.stringify(contract);
   assert(!contractStr.includes("super-secret-li-at-token"), "li_at cookie value not in stored contract");
   assert(!contractStr.includes("js123"), "JSESSIONID value not in stored contract");
-  // The contract must not include any field named 'cookie'
   assert(!Object.prototype.hasOwnProperty.call(contract, "cookie"), "no cookie field on contract object");
 }
 
-async function testAC5d_manualSyncIncludesMessagingContract() {
-  console.log("\nAC5d: MANUAL_SYNC includes messaging_contract when previously captured");
+async function testAC8_manualSyncFailsWithoutContract() {
+  console.log("\nAC8: MANUAL_SYNC fails visibly when messaging contract is missing");
   const env = buildEnv();
   env.storage.accountId = 1;
+  env.storage.csrfToken = "SYNC_CSRF";
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === false, "sync response is not ok when contract missing");
+  assert(/contract/i.test(resp.error || ""), "error message mentions contract");
+  const ingestCall = findIngestCall(env);
+  assert(!ingestCall, "POST /sync/ingest was NOT called when contract missing");
+}
+
+async function testAC8b_manualSyncFailsWithStaleContract() {
+  console.log("\nAC8b: MANUAL_SYNC fails when contract is stale (older than freshness window)");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.csrfToken = "SYNC_CSRF";
+  // ~30 days old
   env.storage.messagingContract = {
-    conversationsQueryId: "messengerConversations.live123",
-    messagesQueryId: "messengerMessages.live456",
-    endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
-    capturedAt: "2026-04-27T10:00:00.000Z",
+    ...FRESH_CONTRACT,
+    capturedAt: new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString(),
   };
   loadBackground(env);
 
   const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
-  assert(resp.ok === true, "sync response is ok");
-
-  const syncCall = env.fetchLog.find((f) => f.url.includes("/sync"));
-  assert(!!syncCall, "POST /sync was called");
-  if (syncCall) {
-    const body = JSON.parse(syncCall.options.body);
-    assert(!!body.messaging_contract, "messaging_contract field present in sync payload");
-    assert(
-      body.messaging_contract.conversationsQueryId === "messengerConversations.live123",
-      "live conversationsQueryId forwarded to sync"
-    );
-    assert(
-      body.messaging_contract.messagesQueryId === "messengerMessages.live456",
-      "live messagesQueryId forwarded to sync"
-    );
-  }
+  assert(resp.ok === false, "sync response is not ok when contract is stale");
+  assert(/(stale|contract|refresh)/i.test(resp.error || ""), "error message hints at staleness");
 }
 
-async function testAC5e_manualSyncNullContractWhenNotCaptured() {
-  console.log("\nAC5e: MANUAL_SYNC sends messaging_contract: null when nothing captured");
+async function testAC8c_manualSyncFailsWithoutCsrf() {
+  console.log("\nAC8c: MANUAL_SYNC fails visibly when csrf-token has not been captured");
   const env = buildEnv();
   env.storage.accountId = 1;
+  env.storage.messagingContract = FRESH_CONTRACT;
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === false, "sync response is not ok when csrf missing");
+  assert(/csrf/i.test(resp.error || ""), "error message mentions csrf");
+}
+
+async function testAC8d_extensionNeverLogsCookiesOrCsrf() {
+  console.log("\nAC8d: extension never logs cookie / csrf / li_at values during MANUAL_SYNC");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.csrfToken = "ajax:super-secret-csrf-DO-NOT-LEAK";
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
+  env.storage.messagingContract = FRESH_CONTRACT;
   loadBackground(env);
 
   await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
-  const syncCall = env.fetchLog.find((f) => f.url.includes("/sync"));
-  if (syncCall) {
-    const body = JSON.parse(syncCall.options.body);
-    assert(body.messaging_contract === null, "messaging_contract is null when not captured");
+  const allLogs = env.consoleCalls.map((c) => c.slice(1).map(String).join(" ")).join("\n");
+  assert(!allLogs.includes("ajax:super-secret-csrf-DO-NOT-LEAK"), "csrf-token value not logged");
+  assert(!allLogs.includes("fake-li-at-token"), "li_at value not logged");
+  assert(!allLogs.toLowerCase().includes("cookie:"), "no 'cookie:' string emitted to console");
+}
+
+async function testAC9_csrfHeaderSentToLinkedIn() {
+  console.log("\nAC9: extension forwards captured csrf-token on LinkedIn requests");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.csrfToken = "ajax:lnk-csrf";
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
+  env.storage.messagingContract = FRESH_CONTRACT;
+  loadBackground(env);
+
+  await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  const meCall = env.fetchLog.find(f => f.url.startsWith("https://www.linkedin.com/voyager/api/me"));
+  if (meCall) {
+    const headers = meCall.options.headers || {};
+    // Headers may use any casing; normalize.
+    const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+    assert(lower["csrf-token"] === "ajax:lnk-csrf", "csrf-token header sent to LinkedIn /me");
+  } else {
+    assert(false, "/me call missing");
   }
 }
 
@@ -539,16 +723,18 @@ async function main() {
   await testAC3_ignoresRemovedCookie();
   await testAC3_ignoresNonLinkedIn();
   await testAC4_headerCapture();
-  await testAC5_manualSync();
-  await testAC5c_manualSyncWithoutCapturedHeaders();
+  await testAC5_manualSyncReadsLinkedInAndIngests();
   await testAC5b_manualSyncIncludesBearerToken();
-  await testAC5c_manualSyncThreadsBrowserContext();
+  await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();
   await testAC7_messagingContractConversations();
   await testAC7b_messagingContractMessages();
   await testAC7c_messagingContractNoSecrets();
-  await testAC5d_manualSyncIncludesMessagingContract();
-  await testAC5e_manualSyncNullContractWhenNotCaptured();
+  await testAC8_manualSyncFailsWithoutContract();
+  await testAC8b_manualSyncFailsWithStaleContract();
+  await testAC8c_manualSyncFailsWithoutCsrf();
+  await testAC8d_extensionNeverLogsCookiesOrCsrf();
+  await testAC9_csrfHeaderSentToLinkedIn();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
   process.exit(failed > 0 ? 1 : 0);

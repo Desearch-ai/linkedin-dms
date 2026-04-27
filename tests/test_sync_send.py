@@ -998,3 +998,244 @@ def test_provider_build_headers_falls_back_to_jsessionid():
     provider = LinkedInProvider(auth=auth)
     headers = provider._build_headers()
     assert headers["csrf-token"] == "ajax:session"
+
+
+# --- /sync/ingest tests (extension-first MVP) ---
+
+
+def _ingest_payload(account_id: int, **overrides):
+    body = {
+        "account_id": account_id,
+        "threads": [
+            {
+                "platform_thread_id": "urn:li:msg_conversation:1",
+                "title": "Alice Example",
+                "messages": [
+                    {
+                        "platform_message_id": "msg-1",
+                        "direction": "in",
+                        "sender": "Alice Example",
+                        "text": "Hi there",
+                        "sent_at": "2026-04-27T10:00:00+00:00",
+                    },
+                    {
+                        "platform_message_id": "msg-2",
+                        "direction": "out",
+                        "sender": "Me",
+                        "text": "Hello",
+                        "sent_at": "2026-04-27T10:01:00+00:00",
+                    },
+                ],
+            },
+            {
+                "platform_thread_id": "urn:li:msg_conversation:2",
+                "title": "Bob",
+                "messages": [
+                    {
+                        "platform_message_id": "msg-3",
+                        "direction": "in",
+                        "sender": "Bob",
+                        "text": "Yo",
+                        "sent_at": "2026-04-27T09:00:00+00:00",
+                    },
+                ],
+            },
+        ],
+        "pages_fetched": 3,
+        "rate_limited": False,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_ingest_endpoint_404_for_unknown_account(db_path):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    empty_storage = Storage(db_path=db_path)
+    empty_storage.migrate()
+    try:
+        with patch("apps.api.main.storage", empty_storage):
+            client = TestClient(app)
+            resp = client.post("/sync/ingest", json=_ingest_payload(1))
+        assert resp.status_code == 404
+    finally:
+        empty_storage.close()
+
+
+def test_ingest_endpoint_returns_counts(storage, account_id):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        resp = client.post("/sync/ingest", json=_ingest_payload(account_id))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["synced_threads"] == 2
+    assert data["messages_inserted"] == 3
+    assert data["messages_skipped_duplicate"] == 0
+    assert data["pages_fetched"] == 3
+    assert data["rate_limited"] is False
+
+
+def test_ingest_endpoint_dedupe_on_repeat(storage, account_id):
+    """A second ingest with the same payload reports 0 inserts and N duplicates."""
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        first = client.post("/sync/ingest", json=_ingest_payload(account_id))
+        assert first.status_code == 200
+        assert first.json()["messages_inserted"] == 3
+
+        second = client.post("/sync/ingest", json=_ingest_payload(account_id))
+    assert second.status_code == 200
+    data = second.json()
+    assert data["messages_inserted"] == 0
+    assert data["messages_skipped_duplicate"] == 3
+    assert data["synced_threads"] == 2
+
+
+def test_ingest_endpoint_persists_threads_and_messages(storage, account_id):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        resp = client.post("/sync/ingest", json=_ingest_payload(account_id))
+    assert resp.status_code == 200
+    threads = storage.list_threads(account_id=account_id)
+    titles = {t["platform_thread_id"]: t["title"] for t in threads}
+    assert titles == {
+        "urn:li:msg_conversation:1": "Alice Example",
+        "urn:li:msg_conversation:2": "Bob",
+    }
+    rows = storage._conn.execute(
+        "SELECT platform_message_id, direction, text FROM messages WHERE account_id=? ORDER BY platform_message_id",
+        (account_id,),
+    ).fetchall()
+    assert [r["platform_message_id"] for r in rows] == ["msg-1", "msg-2", "msg-3"]
+    assert [r["direction"] for r in rows] == ["in", "out", "in"]
+
+
+def test_ingest_endpoint_422_when_threads_missing(storage, account_id):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        resp = client.post("/sync/ingest", json={"account_id": account_id})
+    assert resp.status_code == 422
+
+
+def test_ingest_endpoint_422_for_invalid_direction(storage, account_id):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    body = _ingest_payload(account_id)
+    body["threads"][0]["messages"][0]["direction"] = "sideways"
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        resp = client.post("/sync/ingest", json=body)
+    assert resp.status_code == 422
+
+
+def test_ingest_endpoint_does_not_log_secrets(storage, account_id, caplog):
+    """Ingest must not log cookie / csrf values even if attached to payload metadata."""
+    import logging
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    body = _ingest_payload(account_id)
+    body["messaging_contract"] = {
+        "conversationsQueryId": "messengerConversations.live",
+        "messagesQueryId": "messengerMessages.live",
+        "endpointPath": "/voyager/api/voyagerMessagingGraphQL/graphql",
+        "capturedAt": "2026-04-27T10:00:00.000Z",
+    }
+    secret_li_at = "should-never-appear-li-at-secret"
+    secret_csrf = "ajax:should-never-appear-csrf"
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        with caplog.at_level(logging.DEBUG):
+            resp = client.post(
+                "/sync/ingest",
+                json=body,
+                headers={
+                    "x-li-at": secret_li_at,
+                    "x-csrf-token": secret_csrf,
+                },
+            )
+    assert resp.status_code == 200
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert secret_li_at not in blob
+    assert secret_csrf not in blob
+
+
+def test_ingest_endpoint_propagates_rate_limited_flag(storage, account_id):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+
+    body = _ingest_payload(account_id, rate_limited=True)
+
+    with patch("apps.api.main.storage", storage):
+        client = TestClient(app)
+        resp = client.post("/sync/ingest", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["rate_limited"] is True
+
+
+def test_ingest_helper_counts_inserts_and_duplicates(storage, account_id):
+    """Direct helper test: run_ingest stores threads/messages with dedupe semantics."""
+    from datetime import datetime, timezone
+
+    from libs.core.job_runner import IngestThread, IngestMessage, run_ingest
+
+    threads = [
+        IngestThread(
+            platform_thread_id="t1",
+            title="Tee One",
+            messages=[
+                IngestMessage(
+                    platform_message_id="m1",
+                    direction="in",
+                    sender="A",
+                    text="hi",
+                    sent_at=datetime(2026, 4, 27, tzinfo=timezone.utc),
+                    raw=None,
+                ),
+                IngestMessage(
+                    platform_message_id="m2",
+                    direction="out",
+                    sender=None,
+                    text="hey",
+                    sent_at=datetime(2026, 4, 27, 0, 1, tzinfo=timezone.utc),
+                    raw=None,
+                ),
+            ],
+        ),
+    ]
+    first = run_ingest(account_id=account_id, storage=storage, threads=threads, pages_fetched=1, rate_limited=False)
+    assert first.synced_threads == 1
+    assert first.messages_inserted == 2
+    assert first.messages_skipped_duplicate == 0
+    assert first.pages_fetched == 1
+    assert first.rate_limited is False
+
+    second = run_ingest(account_id=account_id, storage=storage, threads=threads, pages_fetched=1, rate_limited=True)
+    assert second.messages_inserted == 0
+    assert second.messages_skipped_duplicate == 2
+    assert second.rate_limited is True
