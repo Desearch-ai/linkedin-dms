@@ -6,13 +6,23 @@ import httpx
 import os
 import secrets
 from dataclasses import replace
+from datetime import datetime
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
-from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, SyncResult
+from libs.core.job_runner import (
+    IngestMessage,
+    IngestThread,
+    SendResult,
+    SyncConfig,
+    SyncResult,
+    run_ingest,
+    run_send,
+    run_sync,
+)
 from libs.core.models import AccountAuth, BrowserContext, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
@@ -182,6 +192,38 @@ class SendIn(BaseModel):
     csrf_token: str | None = Field(None, description=_CSRF_TOKEN_DESC)
 
 
+class IngestMessageIn(BaseModel):
+    platform_message_id: str = Field(..., min_length=1)
+    direction: str = Field(..., description="'in' or 'out'")
+    sender: str | None = None
+    text: str | None = None
+    sent_at: datetime
+    raw: dict | None = None
+
+    @model_validator(mode="after")
+    def _check_direction(self) -> IngestMessageIn:
+        if self.direction not in ("in", "out"):
+            raise ValueError("direction must be 'in' or 'out'")
+        return self
+
+
+class IngestThreadIn(BaseModel):
+    platform_thread_id: str = Field(..., min_length=1)
+    title: str | None = None
+    messages: list[IngestMessageIn] = Field(default_factory=list)
+
+
+class IngestIn(BaseModel):
+    account_id: int
+    threads: list[IngestThreadIn]
+    pages_fetched: int = Field(0, ge=0)
+    rate_limited: bool = False
+    messaging_contract: dict | None = Field(
+        None,
+        description="Captured messaging contract metadata (queryIds + capturedAt). No secrets.",
+    )
+
+
 class SyncIn(BaseModel):
     account_id: int
     limit_per_thread: int = Field(50, ge=1, le=MAX_MESSAGES_PER_PAGE, description="Messages per page")
@@ -327,6 +369,73 @@ def sync_account(body: SyncIn):
             status_code=422,
             detail=redact_string(str(e)),
         ) from None
+
+
+@app.post("/sync/ingest", dependencies=[Depends(require_api_auth)])
+def ingest_sync(body: IngestIn):
+    """Ingest extension-captured threads/messages.
+
+    The Chrome extension reads LinkedIn directly from the browser session
+    and POSTs normalized data here. This is the primary path for manual
+    Sync Now in the extension; the legacy /sync endpoint remains as
+    fallback. Storage dedupe semantics match run_sync.
+    """
+    try:
+        # Validate the account exists; reuse existing lookup helper.
+        storage.get_account_auth(body.account_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
+
+    threads = [
+        IngestThread(
+            platform_thread_id=t.platform_thread_id,
+            title=t.title,
+            messages=[
+                IngestMessage(
+                    platform_message_id=m.platform_message_id,
+                    direction=m.direction,
+                    sender=m.sender,
+                    text=m.text,
+                    sent_at=m.sent_at,
+                    raw=m.raw,
+                )
+                for m in t.messages
+            ],
+        )
+        for t in body.threads
+    ]
+    try:
+        result: SyncResult = run_ingest(
+            account_id=body.account_id,
+            storage=storage,
+            threads=threads,
+            pages_fetched=body.pages_fetched,
+            rate_limited=body.rate_limited,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=422, detail=redact_string(str(e))) from None
+
+    contract_meta = body.messaging_contract or {}
+    logger.info(
+        "Ingest accepted: %s",
+        redact_for_log({
+            "account_id": body.account_id,
+            "synced_threads": result.synced_threads,
+            "messages_inserted": result.messages_inserted,
+            "messages_skipped_duplicate": result.messages_skipped_duplicate,
+            "pages_fetched": result.pages_fetched,
+            "rate_limited": result.rate_limited,
+            "contract_captured_at": contract_meta.get("capturedAt"),
+        }),
+    )
+    return {
+        "ok": True,
+        "synced_threads": result.synced_threads,
+        "messages_inserted": result.messages_inserted,
+        "messages_skipped_duplicate": result.messages_skipped_duplicate,
+        "pages_fetched": result.pages_fetched,
+        "rate_limited": result.rate_limited,
+    }
 
 
 @app.post("/send", dependencies=[Depends(require_api_auth)])

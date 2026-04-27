@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
@@ -21,6 +21,23 @@ def _normalize_sent_at(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+@dataclass(frozen=True)
+class IngestMessage:
+    platform_message_id: str
+    direction: str  # "in" | "out"
+    sender: Optional[str]
+    text: Optional[str]
+    sent_at: datetime
+    raw: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class IngestThread:
+    platform_thread_id: str
+    title: Optional[str]
+    messages: list[IngestMessage] = field(default_factory=list)
 
 
 @dataclass
@@ -142,6 +159,58 @@ def run_sync(
         messages_skipped_duplicate=messages_skipped,
         pages_fetched=pages_fetched,
         rate_limited=provider.rate_limit_encountered,
+    )
+
+
+def run_ingest(
+    *,
+    account_id: int,
+    storage: Storage,
+    threads: list[IngestThread],
+    pages_fetched: int = 0,
+    rate_limited: bool = False,
+) -> SyncResult:
+    """Persist normalized threads/messages captured by the Chrome extension.
+
+    Mirrors run_sync's storage path (upsert_thread + insert_message) so the
+    counts returned are SyncResult-compatible. The caller (extension) has
+    already done the LinkedIn read, so this function never touches the
+    network. Duplicate ``platform_message_id`` rows are silently skipped and
+    counted under ``messages_skipped_duplicate``.
+    """
+    synced_threads = 0
+    messages_inserted = 0
+    messages_skipped = 0
+
+    for t in threads:
+        thread_id = storage.upsert_thread(
+            account_id=account_id,
+            platform_thread_id=t.platform_thread_id,
+            title=t.title,
+        )
+        for m in t.messages:
+            inserted = storage.insert_message(
+                account_id=account_id,
+                thread_id=thread_id,
+                platform_message_id=m.platform_message_id,
+                direction=m.direction,
+                sender=m.sender,
+                text=m.text,
+                sent_at=_normalize_sent_at(m.sent_at),
+                raw=m.raw,
+            )
+            if inserted:
+                messages_inserted += 1
+            else:
+                messages_skipped += 1
+        synced_threads += 1
+
+    return SyncResult(
+        synced_threads=synced_threads,
+        messages_inserted=messages_inserted,
+        messages_skipped_duplicate=messages_skipped,
+        pages_fetched=pages_fetched,
+        rate_limited=rate_limited,
     )
 
 
