@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import httpx
 from unittest.mock import patch
 
 import pytest
@@ -142,6 +143,76 @@ class TestRefreshValidation:
             json={"account_id": aid, "cookies": "JSESSIONID=ajax:tok123"},
         )
         assert resp.status_code == 422
+
+
+def _http_status_error(status_code: int, *, retry_after: str | None = None) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://www.linkedin.com/voyager/api/graphql")
+    headers = {"content-type": "application/json"}
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    response = httpx.Response(status_code, request=request, headers=headers, json={"status": status_code})
+    return httpx.HTTPStatusError(f"HTTP {status_code}", request=request, response=response)
+
+
+class TestProviderErrorNormalization:
+    @pytest.mark.parametrize("endpoint,patch_target", [("/sync", "apps.api.main.run_sync"), ("/send", "apps.api.main.run_send")])
+    @pytest.mark.parametrize("status_code", [401, 403])
+    def test_auth_http_errors_return_401_with_refresh_guidance(self, client, endpoint, patch_target, status_code):
+        aid = _create_account(client)
+        payload = {"account_id": aid}
+        if endpoint == "/send":
+            payload.update({"recipient": "urn:li:member:123", "text": "hello"})
+
+        with patch(patch_target, side_effect=_http_status_error(status_code)):
+            resp = client.post(endpoint, json=payload)
+
+        assert resp.status_code == 401
+        assert "POST /accounts/refresh" in resp.json()["detail"]
+
+    @pytest.mark.parametrize("endpoint,patch_target", [("/sync", "apps.api.main.run_sync"), ("/send", "apps.api.main.run_send")])
+    @pytest.mark.parametrize("status_code", [429, 999])
+    def test_rate_limit_http_errors_return_429_and_retry_after(self, client, endpoint, patch_target, status_code):
+        aid = _create_account(client)
+        payload = {"account_id": aid}
+        if endpoint == "/send":
+            payload.update({"recipient": "urn:li:member:123", "text": "hello"})
+
+        with patch(patch_target, side_effect=_http_status_error(status_code, retry_after="120")):
+            resp = client.post(endpoint, json=payload)
+
+        assert resp.status_code == 429
+        assert resp.headers["retry-after"] == "120"
+        assert "rate limit" in resp.json()["detail"].lower()
+
+    @pytest.mark.parametrize("endpoint,patch_target", [("/sync", "apps.api.main.run_sync"), ("/send", "apps.api.main.run_send")])
+    @pytest.mark.parametrize("status_code", [400, 404])
+    def test_contract_drift_http_errors_return_502(self, client, endpoint, patch_target, status_code):
+        aid = _create_account(client)
+        payload = {"account_id": aid}
+        if endpoint == "/send":
+            payload.update({"recipient": "urn:li:member:123", "text": "hello"})
+
+        with patch(patch_target, side_effect=_http_status_error(status_code)):
+            resp = client.post(endpoint, json=payload)
+
+        assert resp.status_code == 502
+        assert "contract" in resp.json()["detail"].lower()
+
+    @pytest.mark.parametrize("endpoint,patch_target", [("/sync", "apps.api.main.run_sync"), ("/send", "apps.api.main.run_send")])
+    def test_connection_errors_return_503_with_retry_guidance(self, client, endpoint, patch_target):
+        aid = _create_account(client)
+        payload = {"account_id": aid}
+        if endpoint == "/send":
+            payload.update({"recipient": "urn:li:member:123", "text": "hello"})
+
+        with patch(patch_target, side_effect=ConnectionError("GET failed after 3 network retries; li_at=secret csrf=secret")):
+            resp = client.post(endpoint, json=payload)
+
+        assert resp.status_code == 503
+        detail = resp.json()["detail"].lower()
+        assert "retry" in detail
+        assert "li_at" not in detail
+        assert "csrf" not in detail
 
 
 class TestSessionExpired401:
