@@ -690,6 +690,86 @@ async function testAC8d_extensionNeverLogsCookiesOrCsrf() {
   assert(!allLogs.toLowerCase().includes("cookie:"), "no 'cookie:' string emitted to console");
 }
 
+
+async function testAC10_operatorStatusReadyForSync() {
+  console.log("\nAC10: OPERATOR_STATUS reports complete readiness without leaking secrets");
+  const env = buildEnv();
+  env.storage.serviceUrl = "http://localhost:8899";
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912","secret":"do-not-leak-track"}';
+  env.storage.csrfToken = "ajax:super-secret-csrf-DO-NOT-LEAK";
+  env.storage.headersUpdatedAt = new Date().toISOString();
+  env.storage.messagingContract = FRESH_CONTRACT;
+  env.storage.lastStatus = "connected";
+  env.storage.lastUpdated = new Date().toISOString();
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "OPERATOR_STATUS" });
+  assert(resp.ok === true, "operator status response is ok");
+  const data = resp.data || {};
+  assert(data.readyForSync === true, "readyForSync true when backend config, account, csrf, x-li-track, and fresh contract are present");
+  assert(data.backend?.ready === true, "backend config ready reported");
+  assert(data.account?.ready === true && data.account.accountId === 1, "account readiness includes account id");
+  assert(data.headers?.csrfTokenCaptured === true, "csrf captured flag reported");
+  assert(data.headers?.xLiTrackCaptured === true, "x-li-track captured flag reported");
+  assert(data.messagingContract?.fresh === true, "contract freshness reported");
+  assert(data.messagingContract?.conversationsQueryId === FRESH_CONTRACT.conversationsQueryId, "safe conversations queryId exposed");
+  assert(data.messagingContract?.messagesQueryId === FRESH_CONTRACT.messagesQueryId, "safe messages queryId exposed");
+  assert(Array.isArray(data.missing) && data.missing.length === 0, "missing list empty when ready");
+  const statusStr = JSON.stringify(data);
+  assert(!statusStr.includes("ajax:super-secret-csrf-DO-NOT-LEAK"), "raw csrf-token not exposed in status");
+  assert(!statusStr.includes("do-not-leak-track"), "raw x-li-track value not exposed in status");
+}
+
+async function testAC10b_operatorStatusGuidesMissingAndStaleContext() {
+  console.log("\nAC10b: OPERATOR_STATUS gives actionable missing/stale context guidance");
+  const env = buildEnv();
+  env.storage.serviceUrl = "http://localhost:8899";
+  env.storage.accountId = 7;
+  env.storage.xLiTrack = "TRACK_PRESENT";
+  env.storage.csrfToken = "CSRF_PRESENT";
+  env.storage.messagingContract = {
+    ...FRESH_CONTRACT,
+    capturedAt: new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString(),
+  };
+  env.storage.lastStatus = "error";
+  env.storage.lastError = "fetch failed";
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "OPERATOR_STATUS" });
+  assert(resp.ok === true, "operator status response is ok");
+  const data = resp.data || {};
+  assert(data.readyForSync === false, "readyForSync false when contract is stale");
+  assert(data.messagingContract?.fresh === false, "stale contract freshness false");
+  assert((data.missing || []).includes("fresh messaging contract"), "missing list names fresh messaging contract");
+  assert(/messaging/i.test(data.nextAction || ""), "next action tells operator to open LinkedIn messaging");
+  assert(/prepare context|refresh/i.test(data.nextAction || ""), "next action tells operator to refresh/prepare context before retrying");
+  assert(data.last?.status === "error" && data.last?.error === "fetch failed", "last refresh/sync status exposed without secrets");
+}
+
+
+async function testAC10c_operatorStatusGuidesBackendStart() {
+  console.log("\nAC10c: OPERATOR_STATUS tells operator when backend must be started");
+  const env = buildEnv();
+  env.storage.serviceUrl = "http://localhost:8899";
+  env.storage.accountId = 9;
+  env.storage.xLiTrack = "TRACK_PRESENT";
+  env.storage.csrfToken = "CSRF_PRESENT";
+  env.storage.messagingContract = FRESH_CONTRACT;
+  env.storage.lastStatus = "error";
+  env.storage.lastError = "Failed to fetch Authorization: Bearer backend-token";
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "OPERATOR_STATUS" });
+  assert(resp.ok === true, "operator status response is ok");
+  const data = resp.data || {};
+  assert(data.readyForSync === false, "readyForSync false when backend was unreachable");
+  assert(data.backend?.needsStart === true, "backend status marks start needed");
+  assert((data.missing || []).includes("backend reachable"), "missing list names backend reachability");
+  assert(/start the backend/i.test(data.nextAction || ""), "next action tells operator to start backend");
+  assert(!JSON.stringify(data).includes("backend-token"), "authorization token not exposed in status");
+}
+
 async function testAC9_csrfHeaderSentToLinkedIn() {
   console.log("\nAC9: extension forwards captured csrf-token on LinkedIn requests");
   const env = buildEnv();
@@ -734,6 +814,9 @@ async function main() {
   await testAC8b_manualSyncFailsWithStaleContract();
   await testAC8c_manualSyncFailsWithoutCsrf();
   await testAC8d_extensionNeverLogsCookiesOrCsrf();
+  await testAC10_operatorStatusReadyForSync();
+  await testAC10b_operatorStatusGuidesMissingAndStaleContext();
+  await testAC10c_operatorStatusGuidesBackendStart();
   await testAC9_csrfHeaderSentToLinkedIn();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

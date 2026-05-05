@@ -41,7 +41,25 @@
 
     .status-label { color: #666; }
 
-    .status-value { font-weight: 500; }
+    .status-value {
+      font-weight: 500;
+      text-align: right;
+      max-width: 165px;
+      overflow-wrap: anywhere;
+    }
+
+    .status-row-wide {
+      display: block;
+      margin-top: 8px;
+    }
+
+    .status-row-wide .status-value {
+      display: block;
+      max-width: none;
+      text-align: left;
+      margin-top: 3px;
+      line-height: 1.35;
+    }
 
     .status-dot {
       display: inline-block;
@@ -122,6 +140,10 @@
       </span>
     </div>
     <div class="status-row">
+      <span class="status-label">Backend config</span>
+      <span class="status-value" id="backendStatus">—</span>
+    </div>
+    <div class="status-row">
       <span class="status-label">Account ID</span>
       <span class="status-value" id="accountId">—</span>
     </div>
@@ -132,6 +154,30 @@
     <div class="status-row">
       <span class="status-label">Headers captured</span>
       <span class="status-value" id="headersStatus">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">x-li-track</span>
+      <span class="status-value" id="trackStatus">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">csrf-token</span>
+      <span class="status-value" id="csrfStatus">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Messaging contract</span>
+      <span class="status-value" id="contractStatus">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Contract freshness</span>
+      <span class="status-value" id="contractFreshness">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Last action</span>
+      <span class="status-value" id="lastActionStatus">—</span>
+    </div>
+    <div class="status-row-wide">
+      <span class="status-label">Next step</span>
+      <span class="status-value" id="nextAction">Checking readiness…</span>
     </div>
   </div>
 
@@ -147,7 +193,7 @@
 
   <div class="btn-row">
     <button class="btn-primary" id="btnSync">Sync Now</button>
-    <button class="btn-secondary" id="btnRefresh">Refresh Cookies</button>
+    <button class="btn-secondary" id="btnRefresh">Prepare Context</button>
   </div>
 
   <button class="btn-secondary" id="btnSaveConfig" style="width:100%">Save Config</button>

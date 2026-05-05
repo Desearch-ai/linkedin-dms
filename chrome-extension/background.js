@@ -83,10 +83,21 @@ function buildServiceHeaders(config) {
   return headers;
 }
 
-async function setStatus(status, error = null) {
+function redactOperatorText(value) {
+  if (!value) return value;
+  return String(value)
+    .replace(/(li_at=)[^;\s]+/gi, "$1[redacted]")
+    .replace(/(JSESSIONID=)[^;\s]+/gi, "$1[redacted]")
+    .replace(/(csrf-token|csrf_token|csrf)[:=]\s*[^;\s,}]+/gi, "$1=[redacted]")
+    .replace(/(Authorization[:=]\s*Bearer\s+)[^\s]+/gi, "$1[redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]");
+}
+
+async function setStatus(status, error = null, action = null) {
   await chrome.storage.local.set({
     lastStatus: status,
-    lastError: error,
+    lastError: error ? redactOperatorText(error) : null,
+    lastAction: action,
     lastUpdated: new Date().toISOString(),
   });
 }
@@ -127,8 +138,9 @@ chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
           await registerAccount(config, cookies);
         }
       } catch (err) {
-        console.error("[desearch] cookie change handler error:", err);
-        await setStatus("error", err.message);
+        const error = redactOperatorText(err.message);
+        console.error("[desearch] cookie change handler error:", error);
+        await setStatus("error", error, "cookie");
       }
     });
   }
@@ -155,7 +167,7 @@ async function pushRefresh(config, cookies) {
   }
 
   console.log("[desearch] cookie refresh pushed successfully");
-  await setStatus("connected");
+  await setStatus("connected", null, "refresh");
 }
 
 async function registerAccount(config, cookies) {
@@ -181,7 +193,7 @@ async function registerAccount(config, cookies) {
   const data = await resp.json();
   await chrome.storage.local.set({ accountId: data.account_id });
   console.log("[desearch] account registered:", data.account_id);
-  await setStatus("connected");
+  await setStatus("connected", null, "refresh");
 }
 
 // ─── Header Capture ─────────────────────────────────────────────────────────
@@ -220,17 +232,35 @@ chrome.webRequest.onSendHeaders.addListener(
 // ─── Message handling (from popup) ──────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "OPERATOR_STATUS") {
+    buildOperatorStatus()
+      .then((status) => sendResponse({ ok: true, data: status }))
+      .catch((err) => sendResponse({ ok: false, error: redactOperatorText(err.message) }));
+    return true;
+  }
+
   if (msg.type === "MANUAL_SYNC") {
     handleManualSync()
-      .then((result) => sendResponse({ ok: true, data: result }))
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
+      .then(async (result) => {
+        await setStatus("connected", null, "sync");
+        sendResponse({ ok: true, data: result });
+      })
+      .catch(async (err) => {
+        const error = redactOperatorText(err.message);
+        await setStatus("error", error, "sync");
+        sendResponse({ ok: false, error });
+      });
     return true; // keep channel open for async response
   }
 
   if (msg.type === "MANUAL_REFRESH") {
     handleManualRefresh()
       .then(() => sendResponse({ ok: true }))
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
+      .catch(async (err) => {
+        const error = redactOperatorText(err.message);
+        await setStatus("error", error, "refresh");
+        sendResponse({ ok: false, error });
+      });
     return true;
   }
 });
@@ -252,6 +282,108 @@ function isContractFresh(contract) {
   const ts = Date.parse(contract.capturedAt);
   if (Number.isNaN(ts)) return true;
   return Date.now() - ts <= CONTRACT_FRESHNESS_MS;
+}
+
+function hasRequiredContract(contract) {
+  return !!(contract && contract.conversationsQueryId && contract.messagesQueryId);
+}
+
+function buildOperatorNextAction({ backendReady, accountReady, hasTrack, hasCsrf, hasContract, contractFresh, lastError, serviceUrl }) {
+  if (!backendReady) return "Set the backend Service URL, save config, then click Prepare Context.";
+  if (!accountReady) return "Log in to LinkedIn in this browser, then click Prepare Context.";
+  if (!hasCsrf && !hasTrack) return "Open LinkedIn in this browser to capture csrf-token and x-li-track, then click Prepare Context.";
+  if (!hasCsrf) return "Open LinkedIn in this browser to capture csrf-token, then click Prepare Context.";
+  if (!hasTrack) return "Open LinkedIn in this browser to capture x-li-track, then click Prepare Context.";
+  if (!hasContract) return "Open LinkedIn Messaging until conversations load to capture the messaging contract, then click Prepare Context and retry Sync.";
+  if (!contractFresh) return "Open LinkedIn Messaging to refresh the stale messaging contract, then click Prepare Context and retry Sync.";
+  if (/(fetch failed|failed to fetch|networkerror|econnrefused|connection refused)/i.test(lastError || "")) {
+    return `Start the backend at ${serviceUrl}, then click Prepare Context and retry Sync.`;
+  }
+  return "Ready for Sync Now.";
+}
+
+async function buildOperatorStatus() {
+  const config = await getConfig();
+  const captured = await getCapturedHeaders();
+  const contract = await getCapturedMessagingContract();
+  const meta = await chrome.storage.local.get({
+    headersUpdatedAt: null,
+    lastStatus: null,
+    lastError: null,
+    lastAction: null,
+    lastUpdated: null,
+  });
+
+  const serviceUrl = (config.serviceUrl || "").trim();
+  const backendReady = !!serviceUrl;
+  const accountReady = config.accountId !== null && config.accountId !== undefined;
+  const hasTrack = !!captured.x_li_track;
+  const hasCsrf = !!captured.csrf_token;
+  const hasContract = hasRequiredContract(contract);
+  const contractFresh = hasContract && isContractFresh(contract);
+
+  const missing = [];
+  if (!backendReady) missing.push("backend config");
+  if (!accountReady) missing.push("account id");
+  if (!hasTrack) missing.push("x-li-track");
+  if (!hasCsrf) missing.push("csrf-token");
+  if (!hasContract) missing.push("messaging contract");
+  else if (!contractFresh) missing.push("fresh messaging contract");
+
+  const lastError = redactOperatorText(meta.lastError || null);
+  const backendNeedsStart =
+    meta.lastStatus === "error" &&
+    backendReady &&
+    /(fetch failed|failed to fetch|networkerror|econnrefused|connection refused)/i.test(lastError || "");
+  if (backendNeedsStart) missing.push("backend reachable");
+
+  const readyForSync = missing.length === 0;
+  const nextAction = buildOperatorNextAction({
+    backendReady,
+    accountReady,
+    hasTrack,
+    hasCsrf,
+    hasContract,
+    contractFresh,
+    lastError,
+    serviceUrl,
+  });
+
+  return {
+    readyForSync,
+    missing,
+    nextAction,
+    backend: {
+      ready: backendReady,
+      serviceUrl,
+      needsStart: backendNeedsStart,
+    },
+    account: {
+      ready: accountReady,
+      accountId: config.accountId ?? null,
+    },
+    headers: {
+      xLiTrackCaptured: hasTrack,
+      csrfTokenCaptured: hasCsrf,
+      updatedAt: meta.headersUpdatedAt || null,
+    },
+    messagingContract: {
+      ready: hasContract,
+      fresh: contractFresh,
+      conversationsQueryIdCaptured: !!contract?.conversationsQueryId,
+      messagesQueryIdCaptured: !!contract?.messagesQueryId,
+      conversationsQueryId: contract?.conversationsQueryId || null,
+      messagesQueryId: contract?.messagesQueryId || null,
+      endpointPath: contract?.endpointPath || null,
+      capturedAt: contract?.capturedAt || null,
+    },
+    last: {
+      action: meta.lastAction || null,
+      status: meta.lastStatus || null,
+      error: lastError,
+      updatedAt: meta.lastUpdated || null,
+    },
+  };
 }
 
 function buildLinkedInHeaders(captured) {

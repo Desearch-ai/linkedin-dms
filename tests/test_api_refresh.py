@@ -145,6 +145,65 @@ class TestRefreshValidation:
         assert resp.status_code == 422
 
 
+
+class TestRefreshPreservesBrowserContext:
+    def test_refresh_without_fresh_browser_headers_preserves_stored_context(self, client):
+        aid = _create_account(client)
+        import apps.api.main as api_mod
+
+        resp = client.post(
+            "/accounts/refresh",
+            json={
+                "account_id": aid,
+                "li_at": "AQEDCookieWithContext123",
+                "x_li_track": "TRACK_STORED",
+                "csrf_token": "CSRF_STORED",
+            },
+        )
+        assert resp.status_code == 200
+
+        resp = client.post(
+            "/accounts/refresh",
+            json={"account_id": aid, "li_at": "AQEDFreshCookieOnly456"},
+        )
+        assert resp.status_code == 200
+
+        auth = api_mod.storage.get_account_auth(aid)
+        assert auth.li_at == "AQEDFreshCookieOnly456"
+        assert auth.x_li_track == "TRACK_STORED"
+        assert auth.csrf_token == "CSRF_STORED"
+
+    def test_refresh_with_one_fresh_browser_header_preserves_the_other(self, client):
+        aid = _create_account(client)
+        import apps.api.main as api_mod
+
+        resp = client.post(
+            "/accounts/refresh",
+            json={
+                "account_id": aid,
+                "li_at": "AQEDCookieWithContext123",
+                "x_li_track": "TRACK_STORED",
+                "csrf_token": "CSRF_STORED",
+            },
+        )
+        assert resp.status_code == 200
+
+        resp = client.post(
+            "/accounts/refresh",
+            json={
+                "account_id": aid,
+                "li_at": "AQEDFreshCookieAndCsrf456",
+                "csrf_token": "CSRF_FRESH",
+            },
+        )
+        assert resp.status_code == 200
+
+        auth = api_mod.storage.get_account_auth(aid)
+        assert auth.li_at == "AQEDFreshCookieAndCsrf456"
+        assert auth.x_li_track == "TRACK_STORED"
+        assert auth.csrf_token == "CSRF_FRESH"
+
+
 def _http_status_error(status_code: int, *, retry_after: str | None = None) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://www.linkedin.com/voyager/api/graphql")
     headers = {"content-type": "application/json"}
