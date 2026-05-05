@@ -95,6 +95,41 @@ Security posture for local development:
 - set `DESEARCH_API_TOKEN` if other local processes should not be able to drive the API
 - configure the same bearer token in the Chrome extension popup when API auth is enabled
 
+## Chrome extension preflight
+
+Before validating the extension-button sync path, run the local API and launch or
+verify Chrome through the deterministic preflight harness:
+
+```bash
+uvicorn apps.api.main:app --host 127.0.0.1 --port 8899
+uv run python scripts/extension_preflight.py --launch
+```
+
+The preflight checks `GET /health` at `http://127.0.0.1:8899`, starts or verifies
+Chrome on CDP port `18800`, loads the unpacked extension from
+`chrome-extension/`, verifies the expected extension target through CDP, and
+opens <https://www.linkedin.com/messaging/> so the extension can capture the
+current messaging contract before `Sync Now`.
+
+Useful knobs:
+
+```bash
+uv run python scripts/extension_preflight.py --help
+uv run python scripts/extension_preflight.py \
+  --backend-url http://127.0.0.1:8899 \
+  --cdp-port 18800 \
+  --profile-dir ~/.desearch-linkedin-dms/chrome-profile \
+  --extension-path ./chrome-extension \
+  --launch
+```
+
+Use a Chrome profile that is signed in to LinkedIn for live validation. If you
+use a custom backend URL or API token, set the matching service URL/token in the
+extension popup before pressing `Refresh` or `Sync Now`. The harness prints only
+redacted operational status; it must not be used to dump LinkedIn session
+secrets, browser CSRF material, or local API auth values.
+
+
 ### API request and response shape
 
 `GET /health`
