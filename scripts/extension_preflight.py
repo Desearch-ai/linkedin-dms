@@ -10,10 +10,14 @@ headers, authorization values, or response bodies.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
 import platform
+import secrets
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -29,6 +33,7 @@ EXTENSION_DEFAULT_BACKEND_URL = "http://localhost:8899"
 DEFAULT_CDP_HOST = "127.0.0.1"
 DEFAULT_CDP_PORT = 18800
 LINKEDIN_MESSAGING_URL = "https://www.linkedin.com/messaging/"
+CHROME_ERROR_URL = "chrome-error://chromewebdata/"
 SENSITIVE_TERMS = (
     "li_at",
     "JSESSIONID",
@@ -146,18 +151,31 @@ def extension_id_for_path(extension_path: Path) -> str:
     return "".join(chr(ord("a") + nibble) for byte in digest for nibble in (byte >> 4, byte & 0x0F))
 
 
-def load_manifest_name(extension_path: Path) -> str:
+def load_manifest(extension_path: Path) -> dict[str, Any]:
     manifest_path = extension_path / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise PreflightError(f"Cannot read extension manifest at {manifest_path}: {sanitize_for_output(exc)}") from exc
+    if not isinstance(manifest, dict):
+        raise PreflightError(f"Extension manifest at {manifest_path} is not a JSON object.")
     name = manifest.get("name")
     if name != EXTENSION_NAME:
         raise PreflightError(
             f"Extension manifest name mismatch at {manifest_path}: expected {EXTENSION_NAME!r}."
         )
-    return name
+    if manifest.get("manifest_version") != 3:
+        raise PreflightError(f"Extension manifest at {manifest_path} must be Manifest V3.")
+    service_worker = manifest.get("background", {}).get("service_worker")
+    if not isinstance(service_worker, str) or not service_worker:
+        raise PreflightError(
+            f"Extension manifest at {manifest_path} is missing a Manifest V3 background service_worker."
+        )
+    return manifest
+
+
+def load_manifest_name(extension_path: Path) -> str:
+    return str(load_manifest(extension_path).get("name"))
 
 
 def list_cdp_targets(host: str, port: int, timeout_s: float) -> list[dict[str, Any]]:
@@ -169,18 +187,6 @@ def list_cdp_targets(host: str, port: int, timeout_s: float) -> list[dict[str, A
     if not isinstance(data, list):
         raise PreflightError(f"Chrome CDP /json/list returned an invalid target list on {host}:{port}.")
     return [target for target in data if isinstance(target, dict)]
-
-
-def target_matches_extension(target: dict[str, Any], extension_id: str) -> bool:
-    url = str(target.get("url") or "")
-    return url.startswith(f"chrome-extension://{extension_id}/")
-
-
-def find_extension_target(targets: list[dict[str, Any]], extension_id: str) -> dict[str, Any] | None:
-    for target in targets:
-        if target_matches_extension(target, extension_id):
-            return target
-    return None
 
 
 def open_cdp_url(host: str, port: int, target_url: str, timeout_s: float = 5.0) -> Any:
@@ -198,8 +204,230 @@ def wake_extension_target(host: str, port: int, extension_id: str, timeout_s: fl
     try:
         open_cdp_url(host, port, f"chrome-extension://{extension_id}/popup.html", timeout_s=timeout_s)
     except (HTTPError, URLError, OSError, json.JSONDecodeError):
-        # Best effort only. The subsequent target check produces the actionable error.
+        # Best effort only. The subsequent runtime-proof check produces the actionable error.
         return
+
+
+def target_matches_extension(target: dict[str, Any], extension_id: str) -> bool:
+    url = str(target.get("url") or "")
+    return url.startswith(f"chrome-extension://{extension_id}/")
+
+
+def target_is_chrome_error(target: dict[str, Any]) -> bool:
+    url = str(target.get("url") or "")
+    title = str(target.get("title") or "")
+    return url.startswith(CHROME_ERROR_URL) or CHROME_ERROR_URL in title
+
+
+def summarize_target(target: dict[str, Any]) -> str:
+    parts = []
+    for key in ("type", "url", "title"):
+        value = target.get(key)
+        if value:
+            parts.append(f"{key}={sanitize_for_output(value)}")
+    return ", ".join(parts) or "target details unavailable"
+
+
+def websocket_http_path(parsed: Any) -> str:
+    path = parsed.path or "/"
+    if parsed.query:
+        path += f"?{parsed.query}"
+    return path
+
+
+def send_ws_frame(sock: socket.socket, payload: bytes, opcode: int = 0x1) -> None:
+    header = bytearray()
+    header.append(0x80 | opcode)  # FIN + opcode.
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header.extend(struct.pack("!H", length))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.pack("!Q", length))
+    mask = secrets.token_bytes(4)
+    header.extend(mask)
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    sock.sendall(bytes(header) + masked)
+
+
+def recv_exact(sock: socket.socket, count: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < count:
+        chunk = sock.recv(count - len(chunks))
+        if not chunk:
+            raise PreflightError("CDP websocket closed while waiting for runtime proof.")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def recv_ws_text(sock: socket.socket) -> str:
+    chunks = bytearray()
+    while True:
+        first, second = recv_exact(sock, 2)
+        opcode = first & 0x0F
+        masked = bool(second & 0x80)
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", recv_exact(sock, 2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", recv_exact(sock, 8))[0]
+        mask = recv_exact(sock, 4) if masked else b""
+        payload = recv_exact(sock, length) if length else b""
+        if masked:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        if opcode == 0x8:  # close
+            raise PreflightError("CDP websocket closed before runtime proof returned.")
+        if opcode == 0x9:  # ping; pong with same payload.
+            send_ws_frame(sock, payload, opcode=0xA)
+            continue
+        if opcode in {0x1, 0x0}:  # text or continuation
+            chunks.extend(payload)
+            if first & 0x80:
+                return chunks.decode("utf-8")
+
+
+def cdp_websocket_command(websocket_url: str, method: str, params: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+    parsed = urlparse(websocket_url)
+    if parsed.scheme != "ws" or not parsed.hostname:
+        raise PreflightError("CDP target did not expose a local ws:// websocket debugger URL.")
+    port = parsed.port or 80
+    key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+    request = (
+        f"GET {websocket_http_path(parsed)} HTTP/1.1\r\n"
+        f"Host: {parsed.hostname}:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n\r\n"
+    ).encode("ascii")
+    with socket.create_connection((parsed.hostname, port), timeout=timeout_s) as sock:
+        sock.settimeout(timeout_s)
+        sock.sendall(request)
+        response = bytearray()
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise PreflightError("CDP websocket handshake closed before runtime proof.")
+            response.extend(chunk)
+            if len(response) > 65536:
+                raise PreflightError("CDP websocket handshake response was too large.")
+        header = response.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1", errors="replace")
+        if " 101 " not in header.split("\r\n", 1)[0]:
+            raise PreflightError("CDP websocket debugger handshake was rejected.")
+        message_id = 1
+        send_ws_frame(sock, json.dumps({"id": message_id, "method": method, "params": params}).encode("utf-8"))
+        deadline = time.monotonic() + max(timeout_s, 1.0)
+        while time.monotonic() < deadline:
+            raw = recv_ws_text(sock)
+            data = json.loads(raw)
+            if data.get("id") == message_id:
+                if not isinstance(data, dict):
+                    raise PreflightError("CDP websocket returned an invalid runtime proof response.")
+                return data
+        raise PreflightError("Timed out waiting for CDP runtime proof.")
+
+
+def evaluate_extension_runtime(target: dict[str, Any], extension_id: str, timeout_s: float) -> tuple[dict[str, Any] | None, str | None]:
+    websocket_url = target.get("webSocketDebuggerUrl")
+    if not websocket_url:
+        return None, f"popup target lacks webSocketDebuggerUrl ({summarize_target(target)})"
+    expression = """
+(() => {
+  const runtime = globalThis.chrome && globalThis.chrome.runtime;
+  if (!runtime) return { runtimePresent: false, id: null, manifestName: null, manifestVersion: null };
+  const manifest = typeof runtime.getManifest === 'function' ? runtime.getManifest() : null;
+  return {
+    runtimePresent: true,
+    id: runtime.id || null,
+    manifestName: manifest && manifest.name || null,
+    manifestVersion: manifest && manifest.manifest_version || null,
+    serviceWorker: manifest && manifest.background && manifest.background.service_worker || null,
+    defaultPopup: manifest && manifest.action && manifest.action.default_popup || null
+  };
+})()
+""".strip()
+    try:
+        response = cdp_websocket_command(
+            str(websocket_url),
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "awaitPromise": False},
+            timeout_s=timeout_s,
+        )
+    except (OSError, json.JSONDecodeError, PreflightError) as exc:
+        return None, f"popup runtime evaluation failed ({sanitize_for_output(exc)})"
+    if response.get("exceptionDetails"):
+        return None, "popup runtime evaluation threw before extension identity could be read"
+    value = response.get("result", {}).get("result", {}).get("value")
+    if not isinstance(value, dict):
+        return None, "popup runtime evaluation returned no manifest/runtime object"
+    if not value.get("runtimePresent"):
+        return None, "popup has no chrome.runtime; Chrome may have opened chrome-error://chromewebdata/"
+    runtime_id = value.get("id")
+    manifest_name = value.get("manifestName")
+    manifest_version = value.get("manifestVersion")
+    if runtime_id != extension_id:
+        return None, f"popup runtime id mismatch: expected {extension_id}, got {sanitize_for_output(runtime_id)}"
+    if manifest_name != EXTENSION_NAME:
+        return None, f"popup manifest name mismatch: expected {EXTENSION_NAME}, got {sanitize_for_output(manifest_name)}"
+    if manifest_version != 3:
+        return None, f"popup manifest version mismatch: expected MV3, got {sanitize_for_output(manifest_version)}"
+    return {
+        "proof_type": "popup_runtime",
+        "target_type": sanitize_for_output(target.get("type", "target")),
+        "target_url": sanitize_for_output(target.get("url", "")),
+        "runtime_id": runtime_id,
+        "manifest_name": manifest_name,
+        "manifest_version": manifest_version,
+        "service_worker": sanitize_for_output(value.get("serviceWorker", "")),
+    }, None
+
+
+def find_extension_runtime_proof(
+    targets: list[dict[str, Any]],
+    extension_id: str,
+    service_worker_path: str,
+    timeout_s: float,
+) -> tuple[dict[str, Any] | None, list[str], bool]:
+    candidates = [target for target in targets if target_matches_extension(target, extension_id)]
+    failures: list[str] = []
+    service_worker_url = f"chrome-extension://{extension_id}/{service_worker_path}"
+
+    for target in candidates:
+        if target_is_chrome_error(target):
+            failures.append(f"blocked target is not executable ({CHROME_ERROR_URL}; {summarize_target(target)})")
+            continue
+        target_type = str(target.get("type") or "")
+        target_url = str(target.get("url") or "")
+        if target_type == "service_worker" and target_url == service_worker_url:
+            return {
+                "proof_type": "service_worker",
+                "target_type": target_type,
+                "target_url": sanitize_for_output(target_url),
+                "runtime_id": extension_id,
+                "manifest_name": EXTENSION_NAME,
+                "manifest_version": 3,
+                "service_worker": service_worker_path,
+            }, failures, bool(candidates)
+        if target_type == "service_worker":
+            failures.append(
+                f"service worker target URL mismatch: expected {service_worker_url}, got {summarize_target(target)}"
+            )
+            continue
+        proof, error = evaluate_extension_runtime(target, extension_id, timeout_s)
+        if proof:
+            return proof, failures, bool(candidates)
+        failures.append(error or f"target did not provide executable runtime proof ({summarize_target(target)})")
+
+    return None, failures, bool(candidates)
+
+
+def format_runtime_failures(failures: list[str]) -> str:
+    if not failures:
+        return "no matching executable extension runtime targets were visible"
+    return "; ".join(sanitize_for_output(item) for item in failures[:4])
 
 
 def verify_extension_loaded(
@@ -210,21 +438,33 @@ def verify_extension_loaded(
     timeout_s: float,
     wake: bool = True,
 ) -> tuple[str, dict[str, Any]]:
-    load_manifest_name(extension_path)
+    manifest = load_manifest(extension_path)
+    service_worker_path = str(manifest["background"]["service_worker"])
     expected_id = extension_id or extension_id_for_path(extension_path)
 
-    target = find_extension_target(list_cdp_targets(host, port, timeout_s), expected_id)
-    if not target and wake:
+    proof, failures, saw_candidate = find_extension_runtime_proof(
+        list_cdp_targets(host, port, timeout_s), expected_id, service_worker_path, timeout_s
+    )
+    if not proof and not saw_candidate and wake:
         wake_extension_target(host, port, expected_id, timeout_s)
-        target = find_extension_target(list_cdp_targets(host, port, timeout_s), expected_id)
+        proof, failures, saw_candidate = find_extension_runtime_proof(
+            list_cdp_targets(host, port, timeout_s), expected_id, service_worker_path, timeout_s
+        )
 
-    if not target:
+    if not proof:
+        if saw_candidate:
+            raise PreflightError(
+                f"{EXTENSION_NAME} target exists but no executable runtime proof was found in Chrome CDP {host}:{port}. "
+                f"Evidence: {format_runtime_failures(failures)}. "
+                "Close conflicting Chrome instances and rerun with --launch so --load-extension is honored. "
+                f"Expected extension id: {expected_id}."
+            )
         raise PreflightError(
             f"{EXTENSION_NAME} extension is not loaded from {extension_path.resolve()} in Chrome CDP {host}:{port}. "
             "Launch Chrome with --load-extension pointing at that directory, or rerun this preflight with --launch. "
             f"Expected extension id: {expected_id}."
         )
-    return expected_id, target
+    return expected_id, proof
 
 
 def find_chrome_binary(explicit: str | None) -> str:
@@ -399,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
         browser_name = sanitize_for_output(browser_info.get("Browser", "Chrome"))
         print_status(f"OK Chrome CDP reachable: {args.cdp_host}:{args.cdp_port} ({browser_name})")
 
-        extension_id, target = verify_extension_loaded(
+        extension_id, proof = verify_extension_loaded(
             host=args.cdp_host,
             port=args.cdp_port,
             extension_path=extension_path,
@@ -407,8 +647,13 @@ def main(argv: list[str] | None = None) -> int:
             timeout_s=args.timeout,
             wake=not args.no_extension_wake,
         )
-        target_type = sanitize_for_output(target.get("type", "target"))
-        print_status(f"OK Extension loaded: {EXTENSION_NAME} ({target_type}, id={extension_id})")
+        proof_type = sanitize_for_output(proof.get("proof_type", "runtime"))
+        target_type = sanitize_for_output(proof.get("target_type", "target"))
+        service_worker = sanitize_for_output(proof.get("service_worker", ""))
+        print_status(
+            f"OK Extension executable runtime proof: {proof_type} "
+            f"({target_type}, id={extension_id}, service_worker={service_worker})"
+        )
 
         if backend_url in {DEFAULT_BACKEND_URL, EXTENSION_DEFAULT_BACKEND_URL}:
             print_status(f"OK Extension backend default matches local API: {EXTENSION_DEFAULT_BACKEND_URL}")

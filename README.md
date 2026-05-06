@@ -107,7 +107,10 @@ uv run python scripts/extension_preflight.py --launch
 
 The preflight checks `GET /health` at `http://127.0.0.1:8899`, starts or verifies
 Chrome on CDP port `18800`, loads the unpacked extension from
-`chrome-extension/`, verifies the expected extension target through CDP, and
+`chrome-extension/`, and requires executable runtime proof for the expected
+extension id. A matching `chrome-extension://...` URL alone is not enough: the
+harness must see the MV3 `background.js` service-worker target or evaluate the
+popup runtime and confirm `chrome.runtime.id` plus the manifest identity. It then
 opens <https://www.linkedin.com/messaging/> so the extension can capture the
 current messaging contract before `Sync Now`.
 
