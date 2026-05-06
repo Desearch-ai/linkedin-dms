@@ -8,11 +8,11 @@ This file documents issues that are real in the current implementation, based on
 - `messengerConversations.0d5e6781bbee71c3e51c8843c6519f48`
 - `messengerMessages.21eabeb3ee872254060ef21b793ea7d0`
 
-These values are extracted from LinkedIn frontend traffic and may change without warning. When they change, thread listing or message fetch can fail even though cookies are still valid.
+These values are extracted from LinkedIn frontend traffic and may change without warning. When they change, the legacy backend provider path can fail even though cookies are still valid. The Chrome extension Sync Now path captures the live messaging GraphQL query IDs and safe variable templates from browser traffic instead; if that captured contract is missing or stale, refresh LinkedIn Messaging in the signed-in browser before retrying Sync Now.
 
 Impact:
-- sync can return 4xx or fail during provider execution
-- the service may appear broken until the query IDs are updated in source
+- legacy backend sync can return 4xx or fail during provider execution
+- extension Sync Now can return a contract-refresh error until live messaging traffic is captured again
 
 ## 2. `JSESSIONID` is effectively required for sync
 
