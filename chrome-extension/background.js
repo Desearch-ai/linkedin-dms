@@ -18,8 +18,87 @@ async function getConfig() {
   return result;
 }
 
-// Capture the live messaging GraphQL request contract (queryId + variables shape)
-// from real LinkedIn browser traffic. Stores only metadata — never cookies or auth.
+const SECRET_VARIABLE_KEY_PATTERN = /(cookie|csrf|authorization|password|secret|li_at|jsessionid|(?:auth|access|refresh|bearer)[_-]?token)/i;
+const SECRET_VARIABLE_VALUE_PATTERN = /(li_at=|JSESSIONID=|Authorization\s*[:=]|Bearer\s+)/i;
+const TIMESTAMP_VARIABLE_KEY_PATTERN = /(createdBefore|createdAfter|deliveredBefore|deliveredAfter|beforeTime|afterTime|timestamp)$/i;
+
+function stripOuterParens(value) {
+  const s = String(value || "").trim();
+  if (s.startsWith("(") && s.endsWith(")")) return s.slice(1, -1);
+  return s;
+}
+
+function splitTopLevel(value, delimiter) {
+  const out = [];
+  let current = "";
+  let depth = 0;
+  let quote = null;
+  const s = String(value || "");
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    const prev = s[i - 1];
+    if (quote) {
+      current += ch;
+      if (ch === quote && prev !== "\\") quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+    if (ch === delimiter && depth === 0) {
+      if (current.trim()) out.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) out.push(current.trim());
+  return out;
+}
+
+function parseGraphQLVariables(variablesRaw) {
+  return splitTopLevel(stripOuterParens(variablesRaw), ",")
+    .map((part) => {
+      const idx = part.indexOf(":");
+      if (idx <= 0) return null;
+      const key = part.slice(0, idx).trim();
+      const rawValue = part.slice(idx + 1).trim();
+      return key ? { key, rawValue } : null;
+    })
+    .filter(Boolean);
+}
+
+function normalizeGraphQLScalar(rawValue) {
+  const s = String(rawValue ?? "").trim();
+  if (/^-?\d+$/.test(s)) return Number(s);
+  return s;
+}
+
+function isSecretVariable({ key, rawValue }) {
+  return SECRET_VARIABLE_KEY_PATTERN.test(key) || SECRET_VARIABLE_VALUE_PATTERN.test(rawValue || "");
+}
+
+function buildVariableTemplate(variablesRaw, kind) {
+  const pairs = parseGraphQLVariables(variablesRaw).filter((pair) => !isSecretVariable(pair));
+  const template = pairs.map(({ key, rawValue }) => {
+    if (key === "mailboxUrn") return { key, source: "mailboxUrn" };
+    if (key === "conversationUrn") return { key, source: "conversationUrn" };
+    if (key === "count") {
+      return { key, source: "count", defaultValue: normalizeGraphQLScalar(rawValue) || 20 };
+    }
+    if (TIMESTAMP_VARIABLE_KEY_PATTERN.test(key)) return { key, source: "now" };
+    return { key, value: normalizeGraphQLScalar(rawValue) };
+  });
+  const requiredDynamicKey = kind === "conversations" ? "mailboxUrn" : "conversationUrn";
+  return template.some((entry) => entry.key === requiredDynamicKey) ? template : [];
+}
+
+// Capture the live messaging GraphQL request contract (queryId + variables template)
+// from real LinkedIn browser traffic. Stores only safe metadata — never cookies or auth.
 async function captureMessagingContract(url) {
   try {
     const parsed = new URL(url);
@@ -28,23 +107,19 @@ async function captureMessagingContract(url) {
 
     if (!queryId) return;
 
-    // Extract key names only — shape without runtime identifying values.
-    const variablesShape = variablesRaw
-      .replace(/^\(|\)$/g, "")
-      .split(",")
-      .filter(Boolean)
-      .map((kv) => kv.split(":")[0].trim())
-      .filter(Boolean);
-
     const current = await chrome.storage.local.get({ messagingContract: {} });
     const contract = { ...(current.messagingContract || {}) };
 
     if (queryId.startsWith("messengerConversations.")) {
+      const variablesTemplate = buildVariableTemplate(variablesRaw, "conversations");
       contract.conversationsQueryId = queryId;
-      contract.conversationsVariablesShape = variablesShape;
+      contract.conversationsVariablesShape = variablesTemplate.map((v) => v.key);
+      contract.conversationsVariablesTemplate = variablesTemplate;
     } else if (queryId.startsWith("messengerMessages.")) {
+      const variablesTemplate = buildVariableTemplate(variablesRaw, "messages");
       contract.messagesQueryId = queryId;
-      contract.messagesVariablesShape = variablesShape;
+      contract.messagesVariablesShape = variablesTemplate.map((v) => v.key);
+      contract.messagesVariablesTemplate = variablesTemplate;
     } else {
       return;
     }
@@ -273,6 +348,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 const VOYAGER_ME_URL = "https://www.linkedin.com/voyager/api/me";
 const VOYAGER_BASE = "https://www.linkedin.com";
 const CONTRACT_FRESHNESS_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+const INGEST_CONVERSATIONS_PER_PAGE = 20; // First-MVP first page only.
 const INGEST_MESSAGES_PER_THREAD = 20; // First-MVP first-page only.
 
 function isContractFresh(contract) {
@@ -284,8 +360,47 @@ function isContractFresh(contract) {
   return Date.now() - ts <= CONTRACT_FRESHNESS_MS;
 }
 
+function hasVariableTemplateRequiredKeys(template, requiredKeys) {
+  if (!Array.isArray(template) || template.length === 0) return false;
+  return requiredKeys.every((key) => template.some((entry) => entry && entry.key === key));
+}
+
 function hasRequiredContract(contract) {
-  return !!(contract && contract.conversationsQueryId && contract.messagesQueryId);
+  return !!(
+    contract &&
+    contract.conversationsQueryId &&
+    contract.messagesQueryId &&
+    hasVariableTemplateRequiredKeys(contract.conversationsVariablesTemplate, ["mailboxUrn", "count"]) &&
+    hasVariableTemplateRequiredKeys(contract.messagesVariablesTemplate, ["conversationUrn", "count"])
+  );
+}
+
+function renderGraphQLVariableValue(entry, replacements) {
+  if (entry.source === "mailboxUrn") return replacements.mailboxUrn;
+  if (entry.source === "conversationUrn") return replacements.conversationUrn;
+  if (entry.source === "count") return replacements.count ?? entry.defaultValue ?? entry.value;
+  if (entry.source === "now") return Date.now();
+  return entry.value;
+}
+
+function buildGraphQLVariables(template, replacements, label) {
+  if (!Array.isArray(template) || template.length === 0) {
+    throw new Error(
+      `Captured ${label} messaging contract is missing reusable variables. Open LinkedIn Messaging to refresh the request contract, then retry Sync.`
+    );
+  }
+  const parts = [];
+  for (const entry of template) {
+    if (!entry || !entry.key) continue;
+    const value = renderGraphQLVariableValue(entry, replacements);
+    if (value === undefined || value === null || value === "") {
+      throw new Error(
+        `Captured ${label} messaging contract is missing value for ${entry.key}. Open LinkedIn Messaging to refresh the request contract, then retry Sync.`
+      );
+    }
+    parts.push(`${entry.key}:${String(value)}`);
+  }
+  return `(${parts.join(",")})`;
 }
 
 function buildOperatorNextAction({ backendReady, accountReady, hasTrack, hasCsrf, hasContract, contractFresh, lastError, serviceUrl }) {
@@ -440,7 +555,11 @@ async function fetchVoyagerMe(captured) {
 }
 
 async function fetchConversationsPage(mailboxUrn, contract, captured) {
-  const variables = `(mailboxUrn:${mailboxUrn})`;
+  const variables = buildGraphQLVariables(
+    contract.conversationsVariablesTemplate,
+    { mailboxUrn, count: INGEST_CONVERSATIONS_PER_PAGE },
+    "conversations"
+  );
   const path = contract.endpointPath || "/voyager/api/voyagerMessagingGraphQL/graphql";
   const url = `${VOYAGER_BASE}${path}?queryId=${encodeURIComponent(contract.conversationsQueryId)}&variables=${encodeURIComponent(variables)}`;
   const resp = await fetch(url, {
@@ -454,7 +573,11 @@ async function fetchConversationsPage(mailboxUrn, contract, captured) {
 }
 
 async function fetchMessagesPage(conversationUrn, contract, captured) {
-  const variables = `(conversationUrn:${conversationUrn},count:${INGEST_MESSAGES_PER_THREAD})`;
+  const variables = buildGraphQLVariables(
+    contract.messagesVariablesTemplate,
+    { conversationUrn, count: INGEST_MESSAGES_PER_THREAD },
+    "messages"
+  );
   const path = contract.endpointPath || "/voyager/api/voyagerMessagingGraphQL/graphql";
   const url = `${VOYAGER_BASE}${path}?queryId=${encodeURIComponent(contract.messagesQueryId)}&variables=${encodeURIComponent(variables)}`;
   const resp = await fetch(url, {
@@ -565,9 +688,9 @@ async function handleManualSync() {
   }
 
   const contract = await getCapturedMessagingContract();
-  if (!contract || !contract.conversationsQueryId || !contract.messagesQueryId) {
+  if (!hasRequiredContract(contract)) {
     throw new Error(
-      "Messaging contract not captured. Open https://www.linkedin.com/messaging/ in this browser to record the request shape, then retry sync."
+      "Messaging contract variables not captured. Open https://www.linkedin.com/messaging/ in this browser to record the current request variables, then retry sync."
     );
   }
   if (!isContractFresh(contract)) {

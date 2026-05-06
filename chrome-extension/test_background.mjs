@@ -34,8 +34,18 @@ function assert(cond, label) {
 const FRESH_CONTRACT = {
   conversationsQueryId: "messengerConversations.live123",
   messagesQueryId: "messengerMessages.live456",
-  conversationsVariablesShape: ["mailboxUrn", "count"],
-  messagesVariablesShape: ["conversationUrn", "count"],
+  conversationsVariablesShape: ["mailboxUrn", "count", "includeParticipants"],
+  messagesVariablesShape: ["conversationUrn", "count", "createdBefore"],
+  conversationsVariablesTemplate: [
+    { key: "mailboxUrn", source: "mailboxUrn" },
+    { key: "count", source: "count", defaultValue: 20 },
+    { key: "includeParticipants", value: "true" },
+  ],
+  messagesVariablesTemplate: [
+    { key: "conversationUrn", source: "conversationUrn" },
+    { key: "count", source: "count", defaultValue: 20 },
+    { key: "createdBefore", source: "now" },
+  ],
   endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
   capturedAt: new Date().toISOString(),
 };
@@ -455,12 +465,20 @@ async function testAC5_manualSyncReadsLinkedInAndIngests() {
   assert(!!convCall, "extension fetched conversations from LinkedIn GraphQL");
   if (convCall) {
     assert(convCall.url.includes(FRESH_CONTRACT.conversationsQueryId), "conversations queryId from captured contract");
+    const variables = decodeURIComponent(new URL(convCall.url).searchParams.get("variables") || "");
+    assert(variables.includes("mailboxUrn:urn:li:fsd_profile:42"), "conversations variables include runtime mailboxUrn");
+    assert(variables.includes("count:20"), "conversations variables include captured count requirement");
+    assert(variables.includes("includeParticipants:true"), "conversations variables reuse captured safe static fields");
   }
 
   const msgCalls = env.fetchLog.filter(f => f.url.includes("queryId=messengerMessages"));
   assert(msgCalls.length >= 1, "extension fetched at least one messages page from LinkedIn GraphQL");
   if (msgCalls.length >= 1) {
     assert(msgCalls[0].url.includes(FRESH_CONTRACT.messagesQueryId), "messages queryId from captured contract");
+    const variables = decodeURIComponent(new URL(msgCalls[0].url).searchParams.get("variables") || "");
+    assert(variables.includes("conversationUrn:urn:li:msg_conversation:1"), "messages variables include runtime conversationUrn");
+    assert(variables.includes("count:20"), "messages variables preserve first-page count behavior");
+    assert(/createdBefore:\d{10,}/.test(variables), "messages variables include required timestamp field when captured");
   }
 
   const ingestCall = findIngestCall(env);
@@ -549,7 +567,7 @@ async function testAC7_messagingContractConversations() {
   const headerListener = env.listeners.onSendHeaders[0];
   const url =
     "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
-    "?queryId=messengerConversations.abc123def456&variables=(mailboxUrn:urn:li:fsd_profile:42,count:20)";
+    "?queryId=messengerConversations.abc123def456&variables=(mailboxUrn:urn:li:fsd_profile:42,count:20,includeParticipants:true)";
 
   await headerListener.fn({
     url,
@@ -573,6 +591,21 @@ async function testAC7_messagingContractConversations() {
   assert(Array.isArray(contract.conversationsVariablesShape), "conversationsVariablesShape is an array");
   assert(contract.conversationsVariablesShape.includes("mailboxUrn"), "mailboxUrn key in shape");
   assert(contract.conversationsVariablesShape.includes("count"), "count key in shape");
+  assert(contract.conversationsVariablesShape.includes("includeParticipants"), "safe static key in shape");
+  assert(Array.isArray(contract.conversationsVariablesTemplate), "conversationsVariablesTemplate is an array");
+  assert(
+    contract.conversationsVariablesTemplate.some((v) => v.key === "mailboxUrn" && v.source === "mailboxUrn" && !Object.prototype.hasOwnProperty.call(v, "value")),
+    "mailboxUrn stored as runtime placeholder, not captured profile value"
+  );
+  assert(
+    contract.conversationsVariablesTemplate.some((v) => v.key === "count" && v.source === "count" && v.defaultValue === 20),
+    "count captured as reusable required variable"
+  );
+  assert(
+    contract.conversationsVariablesTemplate.some((v) => v.key === "includeParticipants" && v.value === "true"),
+    "safe static conversation variable captured"
+  );
+  assert(!JSON.stringify(contract).includes("urn:li:fsd_profile:42"), "mailboxUrn value not stored in contract");
 }
 
 async function testAC7b_messagingContractMessages() {
@@ -602,6 +635,16 @@ async function testAC7b_messagingContractMessages() {
   assert(contract.messagesVariablesShape.includes("conversationUrn"), "conversationUrn key in shape");
   assert(contract.messagesVariablesShape.includes("count"), "count key in shape");
   assert(contract.messagesVariablesShape.includes("createdBefore"), "createdBefore key in shape");
+  assert(Array.isArray(contract.messagesVariablesTemplate), "messagesVariablesTemplate is an array");
+  assert(
+    contract.messagesVariablesTemplate.some((v) => v.key === "conversationUrn" && v.source === "conversationUrn" && !Object.prototype.hasOwnProperty.call(v, "value")),
+    "conversationUrn stored as runtime placeholder"
+  );
+  assert(
+    contract.messagesVariablesTemplate.some((v) => v.key === "createdBefore" && v.source === "now"),
+    "createdBefore stored as dynamic timestamp metadata"
+  );
+  assert(!JSON.stringify(contract).includes("2-abc"), "conversationUrn value not stored in contract");
 }
 
 async function testAC7c_messagingContractNoSecrets() {
@@ -612,7 +655,7 @@ async function testAC7c_messagingContractNoSecrets() {
   const headerListener = env.listeners.onSendHeaders[0];
   const url =
     "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
-    "?queryId=messengerConversations.abc123&variables=(mailboxUrn:urn:li:fsd_profile:42)";
+    "?queryId=messengerConversations.abc123&variables=(mailboxUrn:urn:li:fsd_profile:42,count:20,csrfToken:ajax:csrf999,cookie:li_at=super-secret-li-at-token,authToken:super-secret-auth-token)";
 
   await headerListener.fn({
     url,
@@ -628,7 +671,35 @@ async function testAC7c_messagingContractNoSecrets() {
   const contractStr = JSON.stringify(contract);
   assert(!contractStr.includes("super-secret-li-at-token"), "li_at cookie value not in stored contract");
   assert(!contractStr.includes("js123"), "JSESSIONID value not in stored contract");
+  assert(!contractStr.includes("ajax:csrf999"), "csrf variable value not in stored contract");
+  assert(!contractStr.includes("super-secret-auth-token"), "auth token variable value not in stored contract");
   assert(!Object.prototype.hasOwnProperty.call(contract, "cookie"), "no cookie field on contract object");
+  assert(
+    !(contract.conversationsVariablesTemplate || []).some((v) => /cookie|csrf|authToken/i.test(v.key)),
+    "secret-like variable keys not stored in template"
+  );
+}
+
+async function testAC8e_manualSyncFailsWithLegacyShapeOnlyContract() {
+  console.log("\nAC8e: MANUAL_SYNC fails visibly when contract has only legacy variable shapes");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = {
+    conversationsQueryId: "messengerConversations.legacy",
+    messagesQueryId: "messengerMessages.legacy",
+    conversationsVariablesShape: ["mailboxUrn"],
+    messagesVariablesShape: ["conversationUrn", "count"],
+    endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
+    capturedAt: new Date().toISOString(),
+  };
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === false, "sync response is not ok when contract lacks reusable variable template");
+  assert(/(contract|variables|refresh)/i.test(resp.error || ""), "error tells operator to refresh captured variables");
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!convCall, "LinkedIn GraphQL request was NOT made with legacy shape-only contract");
 }
 
 async function testAC8_manualSyncFailsWithoutContract() {
@@ -814,6 +885,7 @@ async function main() {
   await testAC8b_manualSyncFailsWithStaleContract();
   await testAC8c_manualSyncFailsWithoutCsrf();
   await testAC8d_extensionNeverLogsCookiesOrCsrf();
+  await testAC8e_manualSyncFailsWithLegacyShapeOnlyContract();
   await testAC10_operatorStatusReadyForSync();
   await testAC10b_operatorStatusGuidesMissingAndStaleContext();
   await testAC10c_operatorStatusGuidesBackendStart();
