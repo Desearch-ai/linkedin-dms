@@ -9,8 +9,10 @@
  *   AC4 – header capture stores xLiTrack / csrfToken
  *   AC5 – MANUAL_SYNC reads LinkedIn from the browser and POSTs /sync/ingest
  *   AC6 – MANUAL_REFRESH triggers refresh or register
- *   AC7 – messaging contract capture from real traffic
+ *   AC7 – messaging contract capture from real traffic, including no-count templates
  *   AC8 – MANUAL_SYNC fails visibly without contract / csrf
+ *   AC9 – captured csrf-token is forwarded on LinkedIn browser reads
+ *   AC10 – OPERATOR_STATUS readiness, including #1252 minimal no-count and legacy shape-only rejection
  */
 
 import { readFileSync } from "fs";
@@ -31,7 +33,7 @@ function assert(cond, label) {
   }
 }
 
-const FRESH_CONTRACT = {
+const FRESH_RICH_WITH_COUNT_CONTRACT = {
   conversationsQueryId: "messengerConversations.live123",
   messagesQueryId: "messengerMessages.live456",
   conversationsVariablesShape: ["mailboxUrn", "count", "includeParticipants"],
@@ -50,6 +52,10 @@ const FRESH_CONTRACT = {
   capturedAt: new Date().toISOString(),
 };
 
+// Backward-compatible rich contract fixture: LinkedIn captured count in these templates.
+const FRESH_CONTRACT = FRESH_RICH_WITH_COUNT_CONTRACT;
+
+// Current #1252 live contract fixture: LinkedIn omitted count entirely.
 const FRESH_MINIMAL_NO_COUNT_CONTRACT = {
   conversationsQueryId: "messengerConversations.liveNoCount123",
   messagesQueryId: "messengerMessages.liveNoCount456",

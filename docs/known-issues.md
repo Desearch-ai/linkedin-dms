@@ -13,6 +13,7 @@ These values are extracted from LinkedIn frontend traffic and may change without
 Impact:
 - legacy backend sync can return 4xx or fail during provider execution
 - extension Sync Now can return a contract-refresh error until live messaging traffic is captured again
+- operator note: when LinkedIn captures no-count templates, rerun Sync Now as-is; adding `count` manually can break the live GraphQL request
 
 ## 2. `JSESSIONID` is effectively required for sync
 
