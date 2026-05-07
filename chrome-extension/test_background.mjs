@@ -9,8 +9,10 @@
  *   AC4 – header capture stores xLiTrack / csrfToken
  *   AC5 – MANUAL_SYNC reads LinkedIn from the browser and POSTs /sync/ingest
  *   AC6 – MANUAL_REFRESH triggers refresh or register
- *   AC7 – messaging contract capture from real traffic
+ *   AC7 – messaging contract capture from real traffic, including no-count templates
  *   AC8 – MANUAL_SYNC fails visibly without contract / csrf
+ *   AC9 – captured csrf-token is forwarded on LinkedIn browser reads
+ *   AC10 – OPERATOR_STATUS readiness, including #1252 minimal no-count and legacy shape-only rejection
  */
 
 import { readFileSync } from "fs";
@@ -31,7 +33,7 @@ function assert(cond, label) {
   }
 }
 
-const FRESH_CONTRACT = {
+const FRESH_RICH_WITH_COUNT_CONTRACT = {
   conversationsQueryId: "messengerConversations.live123",
   messagesQueryId: "messengerMessages.live456",
   conversationsVariablesShape: ["mailboxUrn", "count", "includeParticipants"],
@@ -45,6 +47,25 @@ const FRESH_CONTRACT = {
     { key: "conversationUrn", source: "conversationUrn" },
     { key: "count", source: "count", defaultValue: 20 },
     { key: "createdBefore", source: "now" },
+  ],
+  endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
+  capturedAt: new Date().toISOString(),
+};
+
+// Backward-compatible rich contract fixture: LinkedIn captured count in these templates.
+const FRESH_CONTRACT = FRESH_RICH_WITH_COUNT_CONTRACT;
+
+// Current #1252 live contract fixture: LinkedIn omitted count entirely.
+const FRESH_MINIMAL_NO_COUNT_CONTRACT = {
+  conversationsQueryId: "messengerConversations.liveNoCount123",
+  messagesQueryId: "messengerMessages.liveNoCount456",
+  conversationsVariablesShape: ["mailboxUrn"],
+  messagesVariablesShape: ["conversationUrn"],
+  conversationsVariablesTemplate: [
+    { key: "mailboxUrn", source: "mailboxUrn" },
+  ],
+  messagesVariablesTemplate: [
+    { key: "conversationUrn", source: "conversationUrn" },
   ],
   endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
   capturedAt: new Date().toISOString(),
@@ -507,6 +528,33 @@ async function testAC5_manualSyncReadsLinkedInAndIngests() {
   }
 }
 
+async function testAC5d_manualSyncNoCountContractOmitsSyntheticCount() {
+  console.log("\nAC5d: MANUAL_SYNC with live no-count contract does not synthesize count variables");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = FRESH_MINIMAL_NO_COUNT_CONTRACT;
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `sync response is ok for no-count contract (got: ${JSON.stringify(resp)})`);
+
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "extension fetched conversations using minimal no-count contract");
+  if (convCall) {
+    const variables = decodeURIComponent(new URL(convCall.url).searchParams.get("variables") || "");
+    assert(variables === "(mailboxUrn:urn:li:fsd_profile:42)", `conversations variables omit synthetic count (got: ${variables})`);
+  }
+
+  const msgCall = env.fetchLog.find(f => f.url.includes("queryId=messengerMessages"));
+  assert(!!msgCall, "extension fetched messages using minimal no-count contract");
+  if (msgCall) {
+    const variables = decodeURIComponent(new URL(msgCall.url).searchParams.get("variables") || "");
+    assert(variables === "(conversationUrn:urn:li:msg_conversation:1)", `messages variables omit synthetic count (got: ${variables})`);
+  }
+}
+
 async function testAC5b_manualSyncIncludesBearerToken() {
   console.log("\nAC5b: MANUAL_SYNC includes Authorization on /sync/ingest when apiToken configured");
   const env = buildEnv();
@@ -645,6 +693,50 @@ async function testAC7b_messagingContractMessages() {
     "createdBefore stored as dynamic timestamp metadata"
   );
   assert(!JSON.stringify(contract).includes("2-abc"), "conversationUrn value not stored in contract");
+}
+
+async function testAC7d_messagingContractMinimalNoCountPassesReadiness() {
+  console.log("\nAC7d: Captures live no-count messaging contract and reports sync readiness");
+  const env = buildEnv();
+  env.storage.serviceUrl = "http://localhost:8899";
+  env.storage.accountId = 1;
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  const conversationsUrl =
+    "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+    "?queryId=messengerConversations.noCountConvs&variables=(mailboxUrn:urn:li:fsd_profile:42)";
+  const messagesUrl =
+    "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+    "?queryId=messengerMessages.noCountMsgs&variables=(conversationUrn:urn:li:msg_conversation:1)";
+
+  await headerListener.fn({
+    url: conversationsUrl,
+    requestHeaders: [
+      { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
+      { name: "csrf-token", value: "ajax:abc123" },
+    ],
+  });
+  await headerListener.fn({
+    url: messagesUrl,
+    requestHeaders: [
+      { name: "x-li-track", value: '{"clientVersion":"1.13.42912"}' },
+      { name: "csrf-token", value: "ajax:abc123" },
+    ],
+  });
+
+  const contract = env.storage.messagingContract;
+  assert(!!contract, "messagingContract stored after no-count requests");
+  assert(contract.conversationsQueryId === "messengerConversations.noCountConvs", "no-count conversations queryId captured");
+  assert(contract.messagesQueryId === "messengerMessages.noCountMsgs", "no-count messages queryId captured");
+  assert(JSON.stringify(contract.conversationsVariablesTemplate) === JSON.stringify([{ key: "mailboxUrn", source: "mailboxUrn" }]), "conversations no-count template stores only mailboxUrn placeholder");
+  assert(JSON.stringify(contract.messagesVariablesTemplate) === JSON.stringify([{ key: "conversationUrn", source: "conversationUrn" }]), "messages no-count template stores only conversationUrn placeholder");
+  assert(!JSON.stringify(contract).includes("count"), "no synthetic count stored for live no-count contract");
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "OPERATOR_STATUS" });
+  assert(resp.ok === true, "operator status response is ok for captured no-count contract");
+  assert(resp.data?.readyForSync === true, "readyForSync true for captured live no-count contract");
+  assert(Array.isArray(resp.data?.missing) && resp.data.missing.length === 0, "missing list empty for live no-count contract");
 }
 
 async function testAC7c_messagingContractNoSecrets() {
@@ -792,6 +884,51 @@ async function testAC10_operatorStatusReadyForSync() {
   assert(!statusStr.includes("do-not-leak-track"), "raw x-li-track value not exposed in status");
 }
 
+async function testAC10d_operatorStatusReadyForMinimalNoCountContract() {
+  console.log("\nAC10d: OPERATOR_STATUS is ready for #1252 minimal no-count contract");
+  const env = buildEnv();
+  env.storage.serviceUrl = "http://localhost:8899";
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
+  env.storage.csrfToken = "ajax:csrf-present";
+  env.storage.headersUpdatedAt = new Date().toISOString();
+  env.storage.messagingContract = FRESH_MINIMAL_NO_COUNT_CONTRACT;
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "OPERATOR_STATUS" });
+  assert(resp.ok === true, "operator status response is ok");
+  const data = resp.data || {};
+  assert(data.readyForSync === true, "readyForSync true when minimal no-count contract and all other gates are present");
+  assert(data.messagingContract?.ready === true, "minimal no-count contract marked ready");
+  assert(data.messagingContract?.fresh === true, "minimal no-count contract marked fresh");
+  assert(Array.isArray(data.missing) && data.missing.length === 0, "missing list empty for minimal no-count contract");
+}
+
+async function testAC10e_operatorStatusRejectsLegacyShapeOnlyContract() {
+  console.log("\nAC10e: OPERATOR_STATUS rejects shape-only legacy contracts without reusable templates");
+  const env = buildEnv();
+  env.storage.serviceUrl = "http://localhost:8899";
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "TRACK_PRESENT";
+  env.storage.csrfToken = "CSRF_PRESENT";
+  env.storage.messagingContract = {
+    conversationsQueryId: "messengerConversations.legacy",
+    messagesQueryId: "messengerMessages.legacy",
+    conversationsVariablesShape: ["mailboxUrn"],
+    messagesVariablesShape: ["conversationUrn"],
+    endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
+    capturedAt: new Date().toISOString(),
+  };
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "OPERATOR_STATUS" });
+  assert(resp.ok === true, "operator status response is ok");
+  const data = resp.data || {};
+  assert(data.readyForSync === false, "readyForSync false for shape-only legacy contract");
+  assert(data.messagingContract?.ready === false, "shape-only legacy contract not marked ready");
+  assert((data.missing || []).includes("messaging contract"), "missing list names messaging contract for shape-only contract");
+}
+
 async function testAC10b_operatorStatusGuidesMissingAndStaleContext() {
   console.log("\nAC10b: OPERATOR_STATUS gives actionable missing/stale context guidance");
   const env = buildEnv();
@@ -875,11 +1012,13 @@ async function main() {
   await testAC3_ignoresNonLinkedIn();
   await testAC4_headerCapture();
   await testAC5_manualSyncReadsLinkedInAndIngests();
+  await testAC5d_manualSyncNoCountContractOmitsSyntheticCount();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();
   await testAC7_messagingContractConversations();
   await testAC7b_messagingContractMessages();
+  await testAC7d_messagingContractMinimalNoCountPassesReadiness();
   await testAC7c_messagingContractNoSecrets();
   await testAC8_manualSyncFailsWithoutContract();
   await testAC8b_manualSyncFailsWithStaleContract();
@@ -887,6 +1026,8 @@ async function main() {
   await testAC8d_extensionNeverLogsCookiesOrCsrf();
   await testAC8e_manualSyncFailsWithLegacyShapeOnlyContract();
   await testAC10_operatorStatusReadyForSync();
+  await testAC10d_operatorStatusReadyForMinimalNoCountContract();
+  await testAC10e_operatorStatusRejectsLegacyShapeOnlyContract();
   await testAC10b_operatorStatusGuidesMissingAndStaleContext();
   await testAC10c_operatorStatusGuidesBackendStart();
   await testAC9_csrfHeaderSentToLinkedIn();

@@ -370,8 +370,8 @@ function hasRequiredContract(contract) {
     contract &&
     contract.conversationsQueryId &&
     contract.messagesQueryId &&
-    hasVariableTemplateRequiredKeys(contract.conversationsVariablesTemplate, ["mailboxUrn", "count"]) &&
-    hasVariableTemplateRequiredKeys(contract.messagesVariablesTemplate, ["conversationUrn", "count"])
+    hasVariableTemplateRequiredKeys(contract.conversationsVariablesTemplate, ["mailboxUrn"]) &&
+    hasVariableTemplateRequiredKeys(contract.messagesVariablesTemplate, ["conversationUrn"])
   );
 }
 
