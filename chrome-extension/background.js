@@ -521,21 +521,22 @@ function extractProfileId(data) {
 
   // For conversations, mailboxUrn must be the fsd_profile URN captured by LinkedIn
   // traffic. /voyager/api/me may also include a numeric plainId; prefer any
-  // fsd_profile URN so no-count contracts replay with the exact mailbox family.
+  // fsd_profile URN so no-count contracts replay with the exact mailbox family,
+  // but preserve the old plainId-first fallback when only non-fsd identifiers exist.
+  addCandidate(data.plainId);
   addCandidate(data.entityUrn);
+  addCandidate(data.publicIdentifier);
   const inner = data.data;
   if (inner && typeof inner === "object") {
-    addCandidate(inner.entityUrn);
+    addCandidate(inner.plainId);
     addCandidate(inner["*miniProfile"]);
+    addCandidate(inner.entityUrn);
   }
   if (Array.isArray(data.included)) {
     for (const item of data.included) {
       if (item && typeof item === "object") addCandidate(item.dashEntityUrn);
     }
   }
-  addCandidate(data.plainId);
-  addCandidate(data.publicIdentifier);
-  if (inner && typeof inner === "object") addCandidate(inner.plainId);
 
   return candidates.find((candidate) => candidate.includes("fsd_profile:")) || candidates[0] || null;
 }

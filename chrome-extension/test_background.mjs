@@ -598,6 +598,39 @@ async function testAC5e_manualSync1252Attempt3NoCountUsesFsdProfileUrnFromMe() {
   }
 }
 
+async function testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn() {
+  console.log("\nAC5f: MANUAL_SYNC keeps plainId fallback when /me entityUrn is not fsd_profile");
+  const env = buildEnv({
+    linkedinResponses: {
+      me: {
+        plainId: "123456789",
+        entityUrn: "urn:li:member:should-not-be-wrapped",
+      },
+      conversations: (url) => {
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (variables.includes("urn:li:fsd_profile:urn:li:member:")) return { __error__: 400 };
+        if (!variables.includes("mailboxUrn:urn:li:fsd_profile:123456789")) return { __error__: 400 };
+        return { data: { messengerConversationsBySyncToken: { elements: [], metadata: {} } } };
+      },
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = FRESH_MINIMAL_NO_COUNT_CONTRACT;
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `non-fsd /me entityUrn does not corrupt mailboxUrn (got: ${JSON.stringify(resp)})`);
+
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "extension fetched conversations with plainId fallback");
+  if (convCall) {
+    const variables = decodeURIComponent(new URL(convCall.url).searchParams.get("variables") || "");
+    assert(variables === "(mailboxUrn:urn:li:fsd_profile:123456789)", `conversations variables use plainId fallback for non-fsd entityUrn (got: ${variables})`);
+  }
+}
+
 async function testAC5b_manualSyncIncludesBearerToken() {
   console.log("\nAC5b: MANUAL_SYNC includes Authorization on /sync/ingest when apiToken configured");
   const env = buildEnv();
@@ -1057,6 +1090,7 @@ async function main() {
   await testAC5_manualSyncReadsLinkedInAndIngests();
   await testAC5d_manualSyncNoCountContractOmitsSyntheticCount();
   await testAC5e_manualSync1252Attempt3NoCountUsesFsdProfileUrnFromMe();
+  await testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();
