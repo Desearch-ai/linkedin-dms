@@ -164,29 +164,33 @@ function buildEnv({ linkedinResponses } = {}) {
       const isMsg = u.includes("queryId=messengerMessages");
       let body;
       if (isConv) {
-        body = lr.conversations === undefined
-          ? {
-              data: {
-                messengerConversationsBySyncToken: {
-                  elements: [
-                    {
-                      entityUrn: "urn:li:msg_conversation:1",
-                      conversationName: null,
-                      conversationParticipants: [
-                        { participantProfile: { entityUrn: "urn:li:fsd_profile:99", firstName: "Alice", lastName: "Example" } },
-                      ],
-                    },
-                    {
-                      entityUrn: "urn:li:msg_conversation:2",
-                      conversationName: "Group Chat",
-                      conversationParticipants: [],
-                    },
-                  ],
-                  metadata: {},
+        if (typeof lr.conversations === "function") {
+          body = lr.conversations(u, options || {});
+        } else {
+          body = lr.conversations === undefined
+            ? {
+                data: {
+                  messengerConversationsBySyncToken: {
+                    elements: [
+                      {
+                        entityUrn: "urn:li:msg_conversation:1",
+                        conversationName: null,
+                        conversationParticipants: [
+                          { participantProfile: { entityUrn: "urn:li:fsd_profile:99", firstName: "Alice", lastName: "Example" } },
+                        ],
+                      },
+                      {
+                        entityUrn: "urn:li:msg_conversation:2",
+                        conversationName: "Group Chat",
+                        conversationParticipants: [],
+                      },
+                    ],
+                    metadata: {},
+                  },
                 },
-              },
-            }
-          : lr.conversations;
+              }
+            : lr.conversations;
+        }
       } else if (isMsg) {
         body = lr.messages === undefined
           ? {
@@ -552,6 +556,78 @@ async function testAC5d_manualSyncNoCountContractOmitsSyntheticCount() {
   if (msgCall) {
     const variables = decodeURIComponent(new URL(msgCall.url).searchParams.get("variables") || "");
     assert(variables === "(conversationUrn:urn:li:msg_conversation:1)", `messages variables omit synthetic count (got: ${variables})`);
+  }
+}
+
+
+async function testAC5e_manualSync1252Attempt3NoCountUsesFsdProfileUrnFromMe() {
+  console.log("\nAC5e: #1252 Attempt #3 no-count conversations replay uses fsd_profile entityUrn from /me");
+  const expectedMailboxUrn = "urn:li:fsd_profile:ACoA-real-fsd-profile";
+  const wrongPlainMailboxUrn = "urn:li:fsd_profile:123456789";
+  const env = buildEnv({
+    linkedinResponses: {
+      me: {
+        plainId: "123456789",
+        entityUrn: expectedMailboxUrn,
+      },
+      conversations: (url) => {
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (variables.includes(`mailboxUrn:${wrongPlainMailboxUrn}`)) return { __error__: 400 };
+        if (!variables.includes(`mailboxUrn:${expectedMailboxUrn}`)) return { __error__: 400 };
+        return { data: { messengerConversationsBySyncToken: { elements: [], metadata: {} } } };
+      },
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = {
+    ...FRESH_MINIMAL_NO_COUNT_CONTRACT,
+    conversationsQueryId: "messengerConversations.1252Attempt3",
+  };
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `#1252 replay does not hit conversations HTTP 400 (got: ${JSON.stringify(resp)})`);
+
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "extension fetched conversations for #1252 no-count replay");
+  if (convCall) {
+    const variables = decodeURIComponent(new URL(convCall.url).searchParams.get("variables") || "");
+    assert(variables === `(mailboxUrn:${expectedMailboxUrn})`, `conversations variables use fsd_profile entityUrn, not plainId (got: ${variables})`);
+  }
+}
+
+async function testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn() {
+  console.log("\nAC5f: MANUAL_SYNC keeps plainId fallback when /me entityUrn is not fsd_profile");
+  const env = buildEnv({
+    linkedinResponses: {
+      me: {
+        plainId: "123456789",
+        entityUrn: "urn:li:member:should-not-be-wrapped",
+      },
+      conversations: (url) => {
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (variables.includes("urn:li:fsd_profile:urn:li:member:")) return { __error__: 400 };
+        if (!variables.includes("mailboxUrn:urn:li:fsd_profile:123456789")) return { __error__: 400 };
+        return { data: { messengerConversationsBySyncToken: { elements: [], metadata: {} } } };
+      },
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.messagingContract = FRESH_MINIMAL_NO_COUNT_CONTRACT;
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `non-fsd /me entityUrn does not corrupt mailboxUrn (got: ${JSON.stringify(resp)})`);
+
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "extension fetched conversations with plainId fallback");
+  if (convCall) {
+    const variables = decodeURIComponent(new URL(convCall.url).searchParams.get("variables") || "");
+    assert(variables === "(mailboxUrn:urn:li:fsd_profile:123456789)", `conversations variables use plainId fallback for non-fsd entityUrn (got: ${variables})`);
   }
 }
 
@@ -1013,6 +1089,8 @@ async function main() {
   await testAC4_headerCapture();
   await testAC5_manualSyncReadsLinkedInAndIngests();
   await testAC5d_manualSyncNoCountContractOmitsSyntheticCount();
+  await testAC5e_manualSync1252Attempt3NoCountUsesFsdProfileUrnFromMe();
+  await testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();

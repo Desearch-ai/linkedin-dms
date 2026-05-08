@@ -37,7 +37,7 @@ Impact:
 
 ## 4. `/voyager/api/me` bootstrap is safer, but still a hard dependency
 
-Sync still needs `/voyager/api/me` to resolve the mailbox/profile URN before thread listing can start.
+Sync still needs `/voyager/api/me` to resolve the mailbox/profile URN before thread listing can start. The extension prefers a returned `urn:li:fsd_profile:...` value (for example `entityUrn`/`dashEntityUrn`) over `plainId`, because current no-count conversations contracts replay `mailboxUrn` as the live `fsd_profile` URN and can 400 when the numeric plainId is rewrapped instead.
 
 Current behavior:
 - redirected or auth-rejected `/voyager/api/me` responses now surface as explicit session/bootstrap failures with `POST /accounts/refresh` guidance

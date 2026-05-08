@@ -513,23 +513,32 @@ function buildLinkedInHeaders(captured) {
 
 function extractProfileId(data) {
   if (!data || typeof data !== "object") return null;
-  if (data.plainId) return String(data.plainId);
-  if (data.entityUrn) return String(data.entityUrn);
-  if (data.publicIdentifier) return String(data.publicIdentifier);
+
+  const candidates = [];
+  const addCandidate = (value) => {
+    if (value !== undefined && value !== null && String(value).trim()) candidates.push(String(value));
+  };
+
+  // For conversations, mailboxUrn must be the fsd_profile URN captured by LinkedIn
+  // traffic. /voyager/api/me may also include a numeric plainId; prefer any
+  // fsd_profile URN so no-count contracts replay with the exact mailbox family,
+  // but preserve the old plainId-first fallback when only non-fsd identifiers exist.
+  addCandidate(data.plainId);
+  addCandidate(data.entityUrn);
+  addCandidate(data.publicIdentifier);
   const inner = data.data;
   if (inner && typeof inner === "object") {
-    if (inner.plainId) return String(inner.plainId);
-    if (inner["*miniProfile"]) return String(inner["*miniProfile"]);
-    if (inner.entityUrn) return String(inner.entityUrn);
+    addCandidate(inner.plainId);
+    addCandidate(inner["*miniProfile"]);
+    addCandidate(inner.entityUrn);
   }
   if (Array.isArray(data.included)) {
     for (const item of data.included) {
-      if (item && typeof item === "object" && item.dashEntityUrn && String(item.dashEntityUrn).includes("fsd_profile")) {
-        return String(item.dashEntityUrn);
-      }
+      if (item && typeof item === "object") addCandidate(item.dashEntityUrn);
     }
   }
-  return null;
+
+  return candidates.find((candidate) => candidate.includes("fsd_profile:")) || candidates[0] || null;
 }
 
 function buildMailboxUrn(profileId) {
