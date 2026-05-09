@@ -73,7 +73,7 @@ const FRESH_MINIMAL_NO_COUNT_CONTRACT = {
 
 // ─── Build mock chrome + fetch environment ──────────────────────────────────
 
-function buildEnv({ linkedinResponses } = {}) {
+function buildEnv({ linkedinResponses, linkedinTabs } = {}) {
   const storage = {};
   const listeners = {
     cookieChanged: [],
@@ -118,6 +118,16 @@ function buildEnv({ linkedinResponses } = {}) {
     webRequest: {
       onSendHeaders: {
         addListener: (fn, filter, opts) => listeners.onSendHeaders.push({ fn, filter, opts }),
+      },
+    },
+    tabs: {
+      query: (_query, cb) => cb(linkedinTabs === undefined ? [{ id: 101, url: "https://www.linkedin.com/messaging/" }] : linkedinTabs),
+    },
+    scripting: {
+      executeScript: async ({ args }) => {
+        const { url, headers } = args[0];
+        const resp = await fakeFetch(url, { method: "GET", headers, credentials: "include", __pageContext: true });
+        return [{ result: { ok: resp.ok, status: resp.status, text: await resp.text() } }];
       },
     },
     runtime: {
@@ -712,6 +722,79 @@ async function testAC5g_manualSyncReplaysQuotedAttempt7DynamicVariables() {
   }
 }
 
+async function testAC5h_manualSyncAttempt8ReplaysFromLinkedInPageWithSafeHeaders() {
+  console.log("\nAC5h: MANUAL_SYNC replays Attempt #8 no-count contract from LinkedIn page context with safe headers");
+  const env = buildEnv({
+    linkedinResponses: {
+      conversations: (url, options) => {
+        const headers = Object.fromEntries(Object.entries(options.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (!options.__pageContext) return { __error__: 400, __text__: "service worker origin rejected" };
+        if (headers["x-li-lang"] !== "en_US") return { __error__: 400, __text__: "missing x-li-lang" };
+        if (headers["x-li-page-instance"] !== "urn:li:page:d_flagship3_messaging") return { __error__: 400, __text__: "missing page instance" };
+        if (variables !== "(mailboxUrn:urn:li:fsd_profile:42)") return { __error__: 400, __text__: "bad variables" };
+        return {
+          data: {
+            messengerConversationsBySyncToken: {
+              elements: [
+                {
+                  entityUrn: "urn:li:msg_conversation:attempt8-1",
+                  conversationName: "Attempt 8 Thread",
+                  conversationParticipants: [],
+                },
+              ],
+              metadata: {},
+            },
+          },
+        };
+      },
+      messages: () => ({ data: { messengerMessagesBySyncToken: { elements: [] } } }),
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  await headerListener.fn({
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      "?queryId=messengerConversations.0d5e6781bbee71c3e51c8843c6519f48&variables=(mailboxUrn:urn%3Ali%3Afsd_profile%3A42)",
+    requestHeaders: [
+      { name: "cookie", value: "li_at=must-not-store" },
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+      { name: "x-li-lang", value: "en_US" },
+      { name: "x-li-page-instance", value: "urn:li:page:d_flagship3_messaging" },
+    ],
+  });
+  await headerListener.fn({
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      "?queryId=messengerMessages.attempt8&variables=(conversationUrn:urn%3Ali%3Amsg_conversation%3Aattempt8-1)",
+    requestHeaders: [
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+      { name: "x-li-lang", value: "en_US" },
+      { name: "x-li-page-instance", value: "urn:li:page:d_flagship3_messaging" },
+    ],
+  });
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `Attempt #8 no-count sync succeeds through LinkedIn page-context replay (got: ${JSON.stringify(resp)})`);
+
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "conversations request was made");
+  if (convCall) {
+    assert(convCall.options.__pageContext === true, "conversations request runs in LinkedIn page context, not extension service-worker context");
+    assert(convCall.options.headers["x-li-lang"] === "en_US", "safe x-li-lang header is replayed");
+    assert(convCall.options.headers["x-li-page-instance"] === "urn:li:page:d_flagship3_messaging", "safe x-li-page-instance header is replayed");
+  }
+  assert(!JSON.stringify(env.storage).includes("li_at=must-not-store"), "raw cookie header was not stored in extension storage");
+  assert(!!findIngestCall(env), "POST /sync/ingest was reached after page-context conversations replay");
+}
+
 async function testAC5b_manualSyncIncludesBearerToken() {
   console.log("\nAC5b: MANUAL_SYNC includes Authorization on /sync/ingest when apiToken configured");
   const env = buildEnv();
@@ -973,6 +1056,8 @@ async function testAC8f_conversationsHttp400IncludesRedactedShapeDiagnostics() {
   assert(error.includes("variable keys/order=mailboxUrn,count,includeParticipants"), "error includes variable keys/order");
   assert(error.includes("rendered variables=(mailboxUrn:[runtime-mailboxUrn],count:20,includeParticipants:true)"), "error includes redacted rendered variables shape");
   assert(error.includes("unsupported variables"), "error includes safe response snippet");
+  assert(error.includes("fetch context=linkedin-page-main-world"), "error includes fetch context diagnostics");
+  assert(error.includes("replay header names="), "error includes replay header-name diagnostics without values");
   assert(!error.includes("ajax:super-secret-csrf-DO-NOT-LEAK"), "captured csrf-token not leaked");
   assert(!error.includes("do-not-leak-track"), "x-li-track not leaked");
   assert(!error.includes("super-secret"), "response secret-like text redacted");
@@ -1202,6 +1287,7 @@ async function main() {
   await testAC5e_manualSync1252Attempt3NoCountUsesFsdProfileUrnFromMe();
   await testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn();
   await testAC5g_manualSyncReplaysQuotedAttempt7DynamicVariables();
+  await testAC5h_manualSyncAttempt8ReplaysFromLinkedInPageWithSafeHeaders();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();

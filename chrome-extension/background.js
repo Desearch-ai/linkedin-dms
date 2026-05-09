@@ -21,6 +21,48 @@ async function getConfig() {
 const SECRET_VARIABLE_KEY_PATTERN = /(cookie|csrf|authorization|password|secret|li_at|jsessionid|(?:auth|access|refresh|bearer)[_-]?token)/i;
 const SECRET_VARIABLE_VALUE_PATTERN = /(li_at=|JSESSIONID=|Authorization\s*[:=]|Bearer\s+)/i;
 const TIMESTAMP_VARIABLE_KEY_PATTERN = /(createdBefore|createdAfter|deliveredBefore|deliveredAfter|beforeTime|afterTime|timestamp)$/i;
+const SECRET_HEADER_NAME_PATTERN = /^(cookie|authorization|proxy-authorization)$/i;
+const SAFE_LINKEDIN_REPLAY_HEADER_NAMES = new Set([
+  "x-li-lang",
+  "x-li-page-instance",
+  "x-li-deco-include-micro-schema",
+]);
+const DEFAULT_SAFE_LINKEDIN_REPLAY_HEADERS = {
+  "x-li-lang": "en_US",
+  "x-li-page-instance": "urn:li:page:d_flagship3_messaging",
+};
+
+function normalizeHeaderName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function canonicalLinkedInHeaderName(name) {
+  const lower = normalizeHeaderName(name);
+  if (lower === "x-li-lang") return "x-li-lang";
+  if (lower === "x-li-page-instance") return "x-li-page-instance";
+  if (lower === "x-li-deco-include-micro-schema") return "x-li-deco-include-micro-schema";
+  return lower;
+}
+
+function redactHeaderNamesForDiagnostics(headers) {
+  return [...new Set((headers || [])
+    .map((h) => normalizeHeaderName(h && h.name))
+    .filter((name) => name && !SECRET_HEADER_NAME_PATTERN.test(name)))]
+    .sort();
+}
+
+function buildSafeLinkedInReplayHeaders(requestHeaders) {
+  const out = {};
+  for (const h of requestHeaders || []) {
+    const name = normalizeHeaderName(h && h.name);
+    const value = String((h && h.value) || "").trim();
+    if (!SAFE_LINKEDIN_REPLAY_HEADER_NAMES.has(name)) continue;
+    if (!value || value.length > 500) continue;
+    if (SECRET_VARIABLE_VALUE_PATTERN.test(value) || SECRET_VARIABLE_KEY_PATTERN.test(name)) continue;
+    out[canonicalLinkedInHeaderName(name)] = value;
+  }
+  return out;
+}
 
 function stripOuterParens(value) {
   const s = String(value || "").trim();
@@ -174,11 +216,19 @@ async function getCapturedHeaders() {
   // Read latest captured browser headers so each backend call carries the
   // freshest fingerprint (see issue #54). Values are null until the header
   // capture listener observes a Voyager request.
-  const { xLiTrack, csrfToken } = await chrome.storage.local.get({
+  const { xLiTrack, csrfToken, safeLinkedInReplayHeaders, browserLinkedInRequestHeaderNames } = await chrome.storage.local.get({
     xLiTrack: null,
     csrfToken: null,
+    safeLinkedInReplayHeaders: {},
+    browserLinkedInRequestHeaderNames: [],
   });
-  return { x_li_track: xLiTrack, csrf_token: csrfToken };
+
+  return {
+    x_li_track: xLiTrack,
+    csrf_token: csrfToken,
+    safe_replay_headers: safeLinkedInReplayHeaders || {},
+    browser_header_names: Array.isArray(browserLinkedInRequestHeaderNames) ? browserLinkedInRequestHeaderNames : [],
+  };
 }
 
 async function getCapturedMessagingContract() {
@@ -264,7 +314,8 @@ async function pushRefresh(config, cookies) {
     account_id: config.accountId,
     li_at: cookies.li_at,
     jsessionid: cookies.JSESSIONID || null,
-    ...captured,
+    x_li_track: captured.x_li_track,
+    csrf_token: captured.csrf_token,
   };
 
   const resp = await fetch(`${config.serviceUrl}/accounts/refresh`, {
@@ -288,7 +339,8 @@ async function registerAccount(config, cookies) {
     label: "chrome-extension",
     li_at: cookies.li_at,
     jsessionid: cookies.JSESSIONID || null,
-    ...captured,
+    x_li_track: captured.x_li_track,
+    csrf_token: captured.csrf_token,
   };
 
   const resp = await fetch(`${config.serviceUrl}/accounts`, {
@@ -324,13 +376,27 @@ chrome.webRequest.onSendHeaders.addListener(
       await captureMessagingContract(url);
     }
 
-    if (!track && !csrf) return;
+    const safeReplayHeaders = buildSafeLinkedInReplayHeaders(headers);
+    const browserHeaderNames = redactHeaderNamesForDiagnostics(headers);
+    if (!track && !csrf && Object.keys(safeReplayHeaders).length === 0) return;
 
     // Preserve previously captured value when only one header is present.
-    const current = await chrome.storage.local.get({ xLiTrack: null, csrfToken: null });
+    const current = await chrome.storage.local.get({
+      xLiTrack: null,
+      csrfToken: null,
+      safeLinkedInReplayHeaders: {},
+      browserLinkedInRequestHeaderNames: [],
+    });
     const updates = {
       xLiTrack: track?.value ?? current.xLiTrack,
       csrfToken: csrf?.value ?? current.csrfToken,
+      safeLinkedInReplayHeaders: {
+        ...(current.safeLinkedInReplayHeaders || {}),
+        ...safeReplayHeaders,
+      },
+      browserLinkedInRequestHeaderNames: browserHeaderNames.length
+        ? browserHeaderNames
+        : (current.browserLinkedInRequestHeaderNames || []),
       headersUpdatedAt: new Date().toISOString(),
     };
 
@@ -474,7 +540,7 @@ function redactGraphQLVariablesForDiagnostics(variables) {
   return `(${parts.join(",")})`;
 }
 
-function buildLinkedInGraphQLError(label, status, contract, variables, responseText) {
+function buildLinkedInGraphQLError(label, status, contract, variables, responseText, replayDiagnostics = "") {
   const queryId = label === "conversations" ? contract?.conversationsQueryId : contract?.messagesQueryId;
   const template = label === "conversations" ? contract?.conversationsVariablesTemplate : contract?.messagesVariablesTemplate;
   const variableKeys = Array.isArray(template) ? template.map((entry) => entry?.key).filter(Boolean).join(",") : "unknown";
@@ -483,7 +549,8 @@ function buildLinkedInGraphQLError(label, status, contract, variables, responseT
     : "unknown";
   const safeResponse = truncateDiagnostic(redactOperatorText(responseText || ""));
   const responsePart = safeResponse ? ` response="${safeResponse}";` : "";
-  return `LinkedIn ${label} request failed (${status}): queryId=${queryId || "unknown"}; variable keys/order=${variableKeys || "none"}; template=${templateShape || "none"}; rendered variables=${redactGraphQLVariablesForDiagnostics(variables)};${responsePart} refresh LinkedIn Messaging to recapture the live contract if this shape is no longer accepted.`;
+  const replayPart = replayDiagnostics ? ` ${replayDiagnostics};` : "";
+  return `LinkedIn ${label} request failed (${status}): queryId=${queryId || "unknown"}; variable keys/order=${variableKeys || "none"}; template=${templateShape || "none"}; rendered variables=${redactGraphQLVariablesForDiagnostics(variables)};${responsePart}${replayPart} refresh LinkedIn Messaging to recapture the live contract if this shape is no longer accepted.`;
 }
 
 function buildOperatorNextAction({ backendReady, accountReady, hasTrack, hasCsrf, hasContract, contractFresh, lastError, serviceUrl }) {
@@ -586,14 +653,104 @@ async function buildOperatorStatus() {
   };
 }
 
-function buildLinkedInHeaders(captured) {
+function buildLinkedInHeaders(captured = {}) {
   const headers = {
     "Accept": "application/graphql,application/vnd.linkedin.normalized+json+2.1",
     "x-restli-protocol-version": "2.0.0",
-    "csrf-token": captured.csrf_token,
+    ...DEFAULT_SAFE_LINKEDIN_REPLAY_HEADERS,
   };
+  for (const [name, value] of Object.entries(captured.safe_replay_headers || {})) {
+    const lower = normalizeHeaderName(name);
+    if (SAFE_LINKEDIN_REPLAY_HEADER_NAMES.has(lower) && value) {
+      headers[canonicalLinkedInHeaderName(lower)] = String(value);
+    }
+  }
+  if (captured.csrf_token) headers["csrf-token"] = captured.csrf_token;
   if (captured.x_li_track) headers["x-li-track"] = captured.x_li_track;
   return headers;
+}
+
+function promiseChromeTabsQuery(query) {
+  return new Promise((resolve) => {
+    if (!chrome.tabs || !chrome.tabs.query) return resolve([]);
+    chrome.tabs.query(query, (tabs) => resolve(Array.isArray(tabs) ? tabs : []));
+  });
+}
+
+async function findLinkedInPageTab() {
+  const tabs = await promiseChromeTabsQuery({ url: ["https://www.linkedin.com/*"] });
+  return tabs.find((tab) => /https:\/\/www\.linkedin\.com\/messaging\//.test(tab.url || ""))
+    || tabs.find((tab) => /https:\/\/www\.linkedin\.com\//.test(tab.url || ""))
+    || null;
+}
+
+function linkedInReplayDiagnostics(captured, fetchContext) {
+  const browserNames = Array.isArray(captured.browser_header_names) ? captured.browser_header_names : [];
+  const replayNames = Object.keys(buildLinkedInHeaders(captured)).map(normalizeHeaderName).sort();
+  return `fetch context=${fetchContext}; credentials=include; browser header names=${browserNames.join(",") || "unknown"}; replay header names=${replayNames.join(",") || "none"}`;
+}
+
+async function executeLinkedInPageFetch(tabId, url, headers) {
+  if (!chrome.scripting || !chrome.scripting.executeScript) {
+    throw new Error("chrome.scripting is unavailable for LinkedIn page-context fetch");
+  }
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [{ url, headers }],
+    func: async ({ url, headers }) => {
+      try {
+        const resp = await fetch(url, {
+          method: "GET",
+          headers,
+          credentials: "include",
+        });
+        return {
+          ok: resp.ok,
+          status: resp.status,
+          text: await resp.text(),
+        };
+      } catch (err) {
+        return { ok: false, status: 0, text: "", error: err && err.message ? err.message : String(err) };
+      }
+    },
+  });
+  const result = results && results[0] && results[0].result;
+  if (!result) throw new Error("LinkedIn page-context fetch returned no result");
+  if (result.error) throw new Error(`LinkedIn page-context fetch failed: ${result.error}`);
+  return { ...result, fetchContext: "linkedin-page-main-world" };
+}
+
+async function fetchLinkedInJson(url, captured, label) {
+  const headers = buildLinkedInHeaders(captured);
+  const tab = await findLinkedInPageTab();
+  let result;
+  if (tab && tab.id !== undefined && tab.id !== null) {
+    result = await executeLinkedInPageFetch(tab.id, url, headers);
+  } else {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers,
+      credentials: "include",
+    });
+    result = { ok: resp.ok, status: resp.status, text: await resp.text(), fetchContext: "extension-service-worker" };
+  }
+
+  let data = null;
+  if (result.ok) {
+    try {
+      data = JSON.parse(result.text || "null");
+    } catch (_) {
+      throw new Error(`LinkedIn ${label} returned non-JSON response (${result.status}). Open LinkedIn Messaging and retry.`);
+    }
+  }
+  return {
+    ok: result.ok,
+    status: result.status,
+    text: result.text || "",
+    data,
+    diagnostics: linkedInReplayDiagnostics(captured, result.fetchContext),
+  };
 }
 
 function extractProfileId(data) {
@@ -632,16 +789,11 @@ function buildMailboxUrn(profileId) {
 }
 
 async function fetchVoyagerMe(captured) {
-  const resp = await fetch(VOYAGER_ME_URL, {
-    method: "GET",
-    headers: buildLinkedInHeaders(captured),
-    credentials: "include",
-  });
+  const resp = await fetchLinkedInJson(VOYAGER_ME_URL, captured, "/voyager/api/me");
   if (!resp.ok) {
-    throw new Error(`LinkedIn /voyager/api/me failed (${resp.status}). Refresh LinkedIn and retry.`);
+    throw new Error(`LinkedIn /voyager/api/me failed (${resp.status}); ${resp.diagnostics}. Refresh LinkedIn and retry.`);
   }
-  const data = await resp.json();
-  const pid = extractProfileId(data);
+  const pid = extractProfileId(resp.data);
   if (!pid) {
     throw new Error("LinkedIn /voyager/api/me returned no profile id. Open LinkedIn and retry.");
   }
@@ -656,17 +808,12 @@ async function fetchConversationsPage(mailboxUrn, contract, captured) {
   );
   const path = contract.endpointPath || "/voyager/api/voyagerMessagingGraphQL/graphql";
   const url = `${VOYAGER_BASE}${path}?queryId=${encodeURIComponent(contract.conversationsQueryId)}&variables=${encodeURIComponent(variables)}`;
-  const resp = await fetch(url, {
-    method: "GET",
-    headers: buildLinkedInHeaders(captured),
-    credentials: "include",
-  });
+  const resp = await fetchLinkedInJson(url, captured, "conversations");
   if (resp.status === 429 || resp.status === 999) return { rateLimited: true, data: null };
   if (!resp.ok) {
-    const detail = await resp.text();
-    throw new Error(buildLinkedInGraphQLError("conversations", resp.status, contract, variables, detail));
+    throw new Error(buildLinkedInGraphQLError("conversations", resp.status, contract, variables, resp.text, resp.diagnostics));
   }
-  return { rateLimited: false, data: await resp.json() };
+  return { rateLimited: false, data: resp.data };
 }
 
 async function fetchMessagesPage(conversationUrn, contract, captured) {
@@ -677,17 +824,12 @@ async function fetchMessagesPage(conversationUrn, contract, captured) {
   );
   const path = contract.endpointPath || "/voyager/api/voyagerMessagingGraphQL/graphql";
   const url = `${VOYAGER_BASE}${path}?queryId=${encodeURIComponent(contract.messagesQueryId)}&variables=${encodeURIComponent(variables)}`;
-  const resp = await fetch(url, {
-    method: "GET",
-    headers: buildLinkedInHeaders(captured),
-    credentials: "include",
-  });
+  const resp = await fetchLinkedInJson(url, captured, "messages");
   if (resp.status === 429 || resp.status === 999) return { rateLimited: true, data: null };
   if (!resp.ok) {
-    const detail = await resp.text();
-    throw new Error(buildLinkedInGraphQLError("messages", resp.status, contract, variables, detail));
+    throw new Error(buildLinkedInGraphQLError("messages", resp.status, contract, variables, resp.text, resp.diagnostics));
   }
-  return { rateLimited: false, data: await resp.json() };
+  return { rateLimited: false, data: resp.data };
 }
 
 function parseConversations(data) {
