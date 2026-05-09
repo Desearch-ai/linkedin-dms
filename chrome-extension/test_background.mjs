@@ -192,28 +192,32 @@ function buildEnv({ linkedinResponses } = {}) {
             : lr.conversations;
         }
       } else if (isMsg) {
-        body = lr.messages === undefined
-          ? {
-              data: {
-                messengerMessagesBySyncToken: {
-                  elements: [
-                    {
-                      entityUrn: "urn:li:event:1",
-                      sender: { participantProfile: { entityUrn: "urn:li:fsd_profile:99", firstName: "Alice", lastName: "Example" } },
-                      eventContent: { attributedBody: { text: "Hi there" } },
-                      createdAt: 1714200000000,
-                    },
-                    {
-                      entityUrn: "urn:li:event:2",
-                      sender: { participantProfile: { entityUrn: "urn:li:fsd_profile:42", firstName: "Me", lastName: "" } },
-                      eventContent: { attributedBody: { text: "Hello" } },
-                      createdAt: 1714200060000,
-                    },
-                  ],
+        if (typeof lr.messages === "function") {
+          body = lr.messages(u, options || {});
+        } else {
+          body = lr.messages === undefined
+            ? {
+                data: {
+                  messengerMessagesBySyncToken: {
+                    elements: [
+                      {
+                        entityUrn: "urn:li:event:1",
+                        sender: { participantProfile: { entityUrn: "urn:li:fsd_profile:99", firstName: "Alice", lastName: "Example" } },
+                        eventContent: { attributedBody: { text: "Hi there" } },
+                        createdAt: 1714200000000,
+                      },
+                      {
+                        entityUrn: "urn:li:event:2",
+                        sender: { participantProfile: { entityUrn: "urn:li:fsd_profile:42", firstName: "Me", lastName: "" } },
+                        eventContent: { attributedBody: { text: "Hello" } },
+                        createdAt: 1714200060000,
+                      },
+                    ],
+                  },
                 },
-              },
-            }
-          : lr.messages;
+              }
+            : lr.messages;
+        }
       } else {
         body = {};
       }
@@ -222,7 +226,7 @@ function buildEnv({ linkedinResponses } = {}) {
           ok: false,
           status: body.__error__,
           json: () => Promise.resolve({}),
-          text: () => Promise.resolve("err"),
+          text: () => Promise.resolve(body.__text__ || "err"),
         });
       }
       return Promise.resolve({
@@ -631,6 +635,83 @@ async function testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn() {
   }
 }
 
+
+async function testAC5g_manualSyncReplaysQuotedAttempt7DynamicVariables() {
+  console.log("\nAC5g: MANUAL_SYNC replays quoted live dynamic variables from captured contract");
+  const env = buildEnv({
+    linkedinResponses: {
+      conversations: (url) => {
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (variables !== '(mailboxUrn:"urn:li:fsd_profile:42")') return { __error__: 400 };
+        return {
+          data: {
+            messengerConversationsBySyncToken: {
+              elements: [
+                {
+                  entityUrn: "urn:li:msg_conversation:quoted-1",
+                  conversationName: null,
+                  conversationParticipants: [],
+                },
+              ],
+              metadata: {},
+            },
+          },
+        };
+      },
+      messages: (url) => {
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (variables !== "(conversationUrn:'urn:li:msg_conversation:quoted-1')") return { __error__: 400 };
+        return { data: { messengerMessagesBySyncToken: { elements: [] } } };
+      },
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  await headerListener.fn({
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      '?queryId=messengerConversations.quotedAttempt7&variables=(mailboxUrn:%22urn%3Ali%3Afsd_profile%3A42%22)',
+    requestHeaders: [
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+    ],
+  });
+  await headerListener.fn({
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      "?queryId=messengerMessages.quotedAttempt7&variables=(conversationUrn:'urn%3Ali%3Amsg_conversation%3Aquoted-1')",
+    requestHeaders: [
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+    ],
+  });
+
+  const storedContract = JSON.stringify(env.storage.messagingContract || {});
+  assert(!storedContract.includes("urn:li:fsd_profile:42"), "captured quoted mailbox value is not stored raw");
+  assert(!storedContract.includes("urn:li:msg_conversation:quoted-1"), "captured quoted conversation value is not stored raw");
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `quoted live contract sync succeeds instead of HTTP 400 (got: ${JSON.stringify(resp)})`);
+
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "extension fetched quoted conversations contract");
+  if (convCall) {
+    const variables = decodeURIComponent(new URL(convCall.url).searchParams.get("variables") || "");
+    assert(variables === '(mailboxUrn:"urn:li:fsd_profile:42")', `conversations variables preserve captured quotes (got: ${variables})`);
+  }
+
+  const msgCall = env.fetchLog.find(f => f.url.includes("queryId=messengerMessages"));
+  assert(!!msgCall, "extension fetched quoted messages contract");
+  if (msgCall) {
+    const variables = decodeURIComponent(new URL(msgCall.url).searchParams.get("variables") || "");
+    assert(variables === "(conversationUrn:'urn:li:msg_conversation:quoted-1')", `messages variables preserve captured quotes (got: ${variables})`);
+  }
+}
+
 async function testAC5b_manualSyncIncludesBearerToken() {
   console.log("\nAC5b: MANUAL_SYNC includes Authorization on /sync/ingest when apiToken configured");
   const env = buildEnv();
@@ -870,6 +951,35 @@ async function testAC8e_manualSyncFailsWithLegacyShapeOnlyContract() {
   assert(!convCall, "LinkedIn GraphQL request was NOT made with legacy shape-only contract");
 }
 
+
+async function testAC8f_conversationsHttp400IncludesRedactedShapeDiagnostics() {
+  console.log("\nAC8f: conversations HTTP 400 includes redacted request-shape diagnostics");
+  const env = buildEnv({
+    linkedinResponses: {
+      conversations: () => ({ __error__: 400, __text__: "csrf-token=ajax:secret; li_at=super-secret; unsupported variables" }),
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.csrfToken = "ajax:super-secret-csrf-DO-NOT-LEAK";
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912","secret":"do-not-leak-track"}';
+  env.storage.messagingContract = FRESH_CONTRACT;
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === false, "sync response is not ok on conversations HTTP 400");
+  const error = resp.error || "";
+  assert(error.includes("LinkedIn conversations request failed (400)"), "error keeps failed status and stage");
+  assert(error.includes("queryId=messengerConversations.live123"), "error includes safe conversations queryId");
+  assert(error.includes("variable keys/order=mailboxUrn,count,includeParticipants"), "error includes variable keys/order");
+  assert(error.includes("rendered variables=(mailboxUrn:[runtime-mailboxUrn],count:20,includeParticipants:true)"), "error includes redacted rendered variables shape");
+  assert(error.includes("unsupported variables"), "error includes safe response snippet");
+  assert(!error.includes("ajax:super-secret-csrf-DO-NOT-LEAK"), "captured csrf-token not leaked");
+  assert(!error.includes("do-not-leak-track"), "x-li-track not leaked");
+  assert(!error.includes("super-secret"), "response secret-like text redacted");
+  const ingestCall = findIngestCall(env);
+  assert(!ingestCall, "POST /sync/ingest was NOT called after LinkedIn HTTP 400");
+}
+
 async function testAC8_manualSyncFailsWithoutContract() {
   console.log("\nAC8: MANUAL_SYNC fails visibly when messaging contract is missing");
   const env = buildEnv();
@@ -1091,6 +1201,7 @@ async function main() {
   await testAC5d_manualSyncNoCountContractOmitsSyntheticCount();
   await testAC5e_manualSync1252Attempt3NoCountUsesFsdProfileUrnFromMe();
   await testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn();
+  await testAC5g_manualSyncReplaysQuotedAttempt7DynamicVariables();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();
@@ -1102,6 +1213,7 @@ async function main() {
   await testAC8b_manualSyncFailsWithStaleContract();
   await testAC8c_manualSyncFailsWithoutCsrf();
   await testAC8d_extensionNeverLogsCookiesOrCsrf();
+  await testAC8f_conversationsHttp400IncludesRedactedShapeDiagnostics();
   await testAC8e_manualSyncFailsWithLegacyShapeOnlyContract();
   await testAC10_operatorStatusReadyForSync();
   await testAC10d_operatorStatusReadyForMinimalNoCountContract();
