@@ -82,11 +82,48 @@ function isSecretVariable({ key, rawValue }) {
   return SECRET_VARIABLE_KEY_PATTERN.test(key) || SECRET_VARIABLE_VALUE_PATTERN.test(rawValue || "");
 }
 
+function safeTemplateWrapper(value) {
+  const s = String(value || "");
+  if (!s || s.length > 40) return "";
+  if (SECRET_VARIABLE_VALUE_PATTERN.test(s) || SECRET_VARIABLE_KEY_PATTERN.test(s)) return "";
+  return s;
+}
+
+function findDynamicGraphQLValue(rawValue, source) {
+  const s = String(rawValue ?? "").trim();
+  const urnPattern =
+    source === "mailboxUrn"
+      ? /urn:li:fsd_profile:[^,)'"\\]+/
+      : /urn:li:msg_conversation:[^,)'"\\]+/;
+  const urnMatch = s.match(urnPattern);
+  if (urnMatch && urnMatch.index !== undefined) {
+    return { start: urnMatch.index, end: urnMatch.index + urnMatch[0].length };
+  }
+
+  const quoted = s.match(/^(['"])(.*)\1$/);
+  if (quoted) return { start: 1, end: s.length - 1 };
+
+  return null;
+}
+
+function buildDynamicVariableEntry(key, source, rawValue) {
+  const entry = { key, source };
+  const s = String(rawValue ?? "").trim();
+  const dynamicValue = findDynamicGraphQLValue(s, source);
+  if (!dynamicValue) return entry;
+
+  const rawPrefix = safeTemplateWrapper(s.slice(0, dynamicValue.start));
+  const rawSuffix = safeTemplateWrapper(s.slice(dynamicValue.end));
+  if (rawPrefix) entry.rawPrefix = rawPrefix;
+  if (rawSuffix) entry.rawSuffix = rawSuffix;
+  return entry;
+}
+
 function buildVariableTemplate(variablesRaw, kind) {
   const pairs = parseGraphQLVariables(variablesRaw).filter((pair) => !isSecretVariable(pair));
   const template = pairs.map(({ key, rawValue }) => {
-    if (key === "mailboxUrn") return { key, source: "mailboxUrn" };
-    if (key === "conversationUrn") return { key, source: "conversationUrn" };
+    if (key === "mailboxUrn") return buildDynamicVariableEntry(key, "mailboxUrn", rawValue);
+    if (key === "conversationUrn") return buildDynamicVariableEntry(key, "conversationUrn", rawValue);
     if (key === "count") {
       return { key, source: "count", defaultValue: normalizeGraphQLScalar(rawValue) || 20 };
     }
@@ -375,9 +412,13 @@ function hasRequiredContract(contract) {
   );
 }
 
+function wrapDynamicGraphQLValue(entry, value) {
+  return `${entry.rawPrefix || ""}${value}${entry.rawSuffix || ""}`;
+}
+
 function renderGraphQLVariableValue(entry, replacements) {
-  if (entry.source === "mailboxUrn") return replacements.mailboxUrn;
-  if (entry.source === "conversationUrn") return replacements.conversationUrn;
+  if (entry.source === "mailboxUrn") return wrapDynamicGraphQLValue(entry, replacements.mailboxUrn);
+  if (entry.source === "conversationUrn") return wrapDynamicGraphQLValue(entry, replacements.conversationUrn);
   if (entry.source === "count") return replacements.count ?? entry.defaultValue ?? entry.value;
   if (entry.source === "now") return Date.now();
   return entry.value;
@@ -401,6 +442,48 @@ function buildGraphQLVariables(template, replacements, label) {
     parts.push(`${entry.key}:${String(value)}`);
   }
   return `(${parts.join(",")})`;
+}
+
+function truncateDiagnostic(value, maxLen = 220) {
+  const s = String(value || "").replace(/\s+/g, " ").trim();
+  return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
+}
+
+function describeTemplateEntry(entry) {
+  if (!entry || !entry.key) return null;
+  const attrs = [];
+  if (entry.source) attrs.push(`source=${entry.source}`);
+  if (entry.rawPrefix || entry.rawSuffix) attrs.push("wrapped");
+  if (Object.prototype.hasOwnProperty.call(entry, "value")) attrs.push("static");
+  return attrs.length ? `${entry.key}{${attrs.join(",")}}` : entry.key;
+}
+
+function redactGraphQLVariablesForDiagnostics(variables) {
+  const pairs = parseGraphQLVariables(variables);
+  if (!pairs.length) return "(unparseable variables)";
+  const parts = pairs.map(({ key, rawValue }) => {
+    if (SECRET_VARIABLE_KEY_PATTERN.test(key) || SECRET_VARIABLE_VALUE_PATTERN.test(rawValue || "")) {
+      return `${key}:[redacted]`;
+    }
+    if (key === "mailboxUrn") return `${key}:[runtime-mailboxUrn]`;
+    if (key === "conversationUrn") return `${key}:[runtime-conversationUrn]`;
+    if (TIMESTAMP_VARIABLE_KEY_PATTERN.test(key)) return `${key}:[runtime-timestamp]`;
+    const value = truncateDiagnostic(redactOperatorText(rawValue), 80);
+    return `${key}:${value || "[empty]"}`;
+  });
+  return `(${parts.join(",")})`;
+}
+
+function buildLinkedInGraphQLError(label, status, contract, variables, responseText) {
+  const queryId = label === "conversations" ? contract?.conversationsQueryId : contract?.messagesQueryId;
+  const template = label === "conversations" ? contract?.conversationsVariablesTemplate : contract?.messagesVariablesTemplate;
+  const variableKeys = Array.isArray(template) ? template.map((entry) => entry?.key).filter(Boolean).join(",") : "unknown";
+  const templateShape = Array.isArray(template)
+    ? template.map(describeTemplateEntry).filter(Boolean).join(",")
+    : "unknown";
+  const safeResponse = truncateDiagnostic(redactOperatorText(responseText || ""));
+  const responsePart = safeResponse ? ` response="${safeResponse}";` : "";
+  return `LinkedIn ${label} request failed (${status}): queryId=${queryId || "unknown"}; variable keys/order=${variableKeys || "none"}; template=${templateShape || "none"}; rendered variables=${redactGraphQLVariablesForDiagnostics(variables)};${responsePart} refresh LinkedIn Messaging to recapture the live contract if this shape is no longer accepted.`;
 }
 
 function buildOperatorNextAction({ backendReady, accountReady, hasTrack, hasCsrf, hasContract, contractFresh, lastError, serviceUrl }) {
@@ -489,6 +572,8 @@ async function buildOperatorStatus() {
       messagesQueryIdCaptured: !!contract?.messagesQueryId,
       conversationsQueryId: contract?.conversationsQueryId || null,
       messagesQueryId: contract?.messagesQueryId || null,
+      conversationsVariablesShape: Array.isArray(contract?.conversationsVariablesShape) ? contract.conversationsVariablesShape : [],
+      messagesVariablesShape: Array.isArray(contract?.messagesVariablesShape) ? contract.messagesVariablesShape : [],
       endpointPath: contract?.endpointPath || null,
       capturedAt: contract?.capturedAt || null,
     },
@@ -577,7 +662,10 @@ async function fetchConversationsPage(mailboxUrn, contract, captured) {
     credentials: "include",
   });
   if (resp.status === 429 || resp.status === 999) return { rateLimited: true, data: null };
-  if (!resp.ok) throw new Error(`LinkedIn conversations request failed (${resp.status}).`);
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(buildLinkedInGraphQLError("conversations", resp.status, contract, variables, detail));
+  }
   return { rateLimited: false, data: await resp.json() };
 }
 
@@ -595,7 +683,10 @@ async function fetchMessagesPage(conversationUrn, contract, captured) {
     credentials: "include",
   });
   if (resp.status === 429 || resp.status === 999) return { rateLimited: true, data: null };
-  if (!resp.ok) throw new Error(`LinkedIn messages request failed (${resp.status}).`);
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(buildLinkedInGraphQLError("messages", resp.status, contract, variables, detail));
+  }
   return { rateLimited: false, data: await resp.json() };
 }
 
