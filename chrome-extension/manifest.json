@@ -6,7 +6,9 @@
   "permissions": [
     "cookies",
     "storage",
-    "webRequest"
+    "webRequest",
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "https://www.linkedin.com/*",
