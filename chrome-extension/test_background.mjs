@@ -894,6 +894,92 @@ async function testAC5i_manualSyncAttempt9ReplaysCapturedGraphQLMethodAndSafeHea
   assert(!!findIngestCall(env), "POST /sync/ingest was reached after Attempt #9 replay");
 }
 
+async function testAC5j_manualSyncAttempt11OmitsCapturedFirstPagePagination() {
+  console.log("\nAC5j: MANUAL_SYNC Attempt #11 omits stale first-page pagination and normalizes message window variables");
+  const expectedConversationsVariables = "(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),count:20,mailboxUrn:urn:li:fsd_profile:42)";
+  const env = buildEnv({
+    linkedinResponses: {
+      conversations: (url) => {
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (variables.includes("SHOULD_NOT_APPEAR")) return { __error__: 400, __text__: "stale pagination replayed" };
+        if (variables !== expectedConversationsVariables) {
+          return { __error__: 400, __text__: `bad conversations variables ${variables}` };
+        }
+        return {
+          data: {
+            messengerConversationsBySyncToken: {
+              elements: [
+                {
+                  entityUrn: "urn:li:msg_conversation:attempt11-1",
+                  conversationName: null,
+                  conversationParticipants: [],
+                },
+              ],
+              metadata: {},
+            },
+          },
+        };
+      },
+      messages: (url) => {
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (
+          variables.includes("SHOULD_NOT_APPEAR") ||
+          variables.includes("1111111111111") ||
+          variables.includes("countBefore:7") ||
+          variables.includes("countAfter:3")
+        ) {
+          return { __error__: 400, __text__: "stale message window replayed" };
+        }
+        const expected = /^\(deliveredAt:\d{10,},conversationUrn:urn:li:msg_conversation:attempt11-1,countBefore:20,countAfter:0\)$/;
+        if (!expected.test(variables)) return { __error__: 400, __text__: `bad messages variables ${variables}` };
+        return { data: { messengerMessagesBySyncToken: { elements: [] } } };
+      },
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  const conversationsVariables = "(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),count:50,mailboxUrn:urn:li:fsd_profile:captured,nextCursor:SHOULD_NOT_APPEAR)";
+  const messagesVariables = "(deliveredAt:1111111111111,conversationUrn:urn:li:msg_conversation:captured,countBefore:7,countAfter:3)";
+  await headerListener.fn({
+    method: "GET",
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      `?queryId=messengerConversations.attempt11&variables=${encodeURIComponent(conversationsVariables)}`,
+    requestHeaders: [
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+    ],
+  });
+  await headerListener.fn({
+    method: "GET",
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      `?queryId=messengerMessages.attempt11&variables=${encodeURIComponent(messagesVariables)}`,
+    requestHeaders: [
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+    ],
+  });
+
+  const contract = env.storage.messagingContract || {};
+  const cursorEntry = contract.conversationsVariablesTemplate?.find((v) => v.key === "nextCursor");
+  const countEntry = contract.conversationsVariablesTemplate?.find((v) => v.key === "count");
+  assert(cursorEntry?.source === "cursor" && cursorEntry?.optional === true, "nextCursor captured as optional first-page cursor metadata");
+  assert(countEntry?.source === "count" && countEntry.defaultValue === 20, "captured conversations count is normalized to first-page default metadata");
+  assert(!JSON.stringify(contract).includes("SHOULD_NOT_APPEAR"), "captured pagination value is not stored in contract");
+  assert(contract.messagesVariablesTemplate?.some((v) => v.key === "deliveredAt" && v.source === "now"), "deliveredAt captured as runtime timestamp metadata");
+  assert(contract.messagesVariablesTemplate?.some((v) => v.key === "countBefore" && v.source === "countBefore"), "countBefore captured as first-page count metadata");
+  assert(contract.messagesVariablesTemplate?.some((v) => v.key === "countAfter" && v.source === "countAfter" && v.defaultValue === 0), "countAfter captured as first-page zero lookahead metadata");
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `Attempt #11 first-page replay reaches ingest (got: ${JSON.stringify(resp)})`);
+  assert(!!findIngestCall(env), "POST /sync/ingest was reached after Attempt #11 first-page replay");
+}
+
 async function testAC5b_manualSyncIncludesBearerToken() {
   console.log("\nAC5b: MANUAL_SYNC includes Authorization on /sync/ingest when apiToken configured");
   const env = buildEnv();
@@ -1026,6 +1112,10 @@ async function testAC7b_messagingContractMessages() {
   assert(
     contract.messagesVariablesTemplate.some((v) => v.key === "conversationUrn" && v.source === "conversationUrn" && !Object.prototype.hasOwnProperty.call(v, "value")),
     "conversationUrn stored as runtime placeholder"
+  );
+  assert(
+    contract.messagesVariablesTemplate.some((v) => v.key === "count" && v.source === "count" && v.defaultValue === 20),
+    "captured message count is normalized to first-page default metadata"
   );
   assert(
     contract.messagesVariablesTemplate.some((v) => v.key === "createdBefore" && v.source === "now"),
@@ -1165,6 +1255,50 @@ async function testAC8f_conversationsHttp400IncludesRedactedShapeDiagnostics() {
   assert(!error.includes("super-secret"), "response secret-like text redacted");
   const ingestCall = findIngestCall(env);
   assert(!ingestCall, "POST /sync/ingest was NOT called after LinkedIn HTTP 400");
+}
+
+async function testAC8g_attempt11Http400ReportsOmittedCursorDiagnostics() {
+  console.log("\nAC8g: Attempt #11 HTTP 400 diagnostics report omitted optional cursor without leaking it");
+  const staleCursorSentinel = "REDACTED_CURSOR_SENTINEL";
+  const env = buildEnv({
+    linkedinResponses: {
+      conversations: () => ({ __error__: 400, __text__: `nextCursor:${staleCursorSentinel}; unsupported first page` }),
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.csrfToken = "SYNC_CSRF";
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.messagingContract = {
+    conversationsQueryId: "messengerConversations.attempt11diag",
+    messagesQueryId: "messengerMessages.attempt11diag",
+    conversationsVariablesShape: ["query", "count", "mailboxUrn", "nextCursor"],
+    messagesVariablesShape: ["deliveredAt", "conversationUrn", "countBefore", "countAfter"],
+    conversationsVariablesTemplate: [
+      { key: "query", value: "(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX))))" },
+      { key: "count", source: "count", defaultValue: 20 },
+      { key: "mailboxUrn", source: "mailboxUrn" },
+      { key: "nextCursor", source: "cursor", optional: true },
+    ],
+    messagesVariablesTemplate: [
+      { key: "deliveredAt", source: "now" },
+      { key: "conversationUrn", source: "conversationUrn" },
+      { key: "countBefore", source: "countBefore", defaultValue: 20 },
+      { key: "countAfter", source: "countAfter", defaultValue: 0 },
+    ],
+    endpointPath: "/voyager/api/voyagerMessagingGraphQL/graphql",
+    capturedAt: new Date().toISOString(),
+  };
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === false, "sync response is not ok on Attempt #11 diagnostic HTTP 400");
+  const error = resp.error || "";
+  assert(error.includes("nextCursor{source=cursor,optional}"), "error template marks nextCursor as optional cursor metadata");
+  assert(error.includes("omitted optional variables=nextCursor"), "error reports omitted optional nextCursor");
+  assert(error.includes("rendered variables=(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),count:20,mailboxUrn:[runtime-mailboxUrn])"), "rendered variables omit nextCursor for first-page replay");
+  assert(error.includes("nextCursor:[redacted]"), "response cursor value is redacted in diagnostics");
+  assert(!error.includes(staleCursorSentinel), "raw cursor-like sentinel is not leaked");
+  assert(!findIngestCall(env), "POST /sync/ingest was NOT called after Attempt #11 diagnostic HTTP 400");
 }
 
 async function testAC8_manualSyncFailsWithoutContract() {
@@ -1391,6 +1525,7 @@ async function main() {
   await testAC5g_manualSyncReplaysQuotedAttempt7DynamicVariables();
   await testAC5h_manualSyncAttempt8ReplaysFromLinkedInPageWithSafeHeaders();
   await testAC5i_manualSyncAttempt9ReplaysCapturedGraphQLMethodAndSafeHeaders();
+  await testAC5j_manualSyncAttempt11OmitsCapturedFirstPagePagination();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();
@@ -1403,6 +1538,7 @@ async function main() {
   await testAC8c_manualSyncFailsWithoutCsrf();
   await testAC8d_extensionNeverLogsCookiesOrCsrf();
   await testAC8f_conversationsHttp400IncludesRedactedShapeDiagnostics();
+  await testAC8g_attempt11Http400ReportsOmittedCursorDiagnostics();
   await testAC8e_manualSyncFailsWithLegacyShapeOnlyContract();
   await testAC10_operatorStatusReadyForSync();
   await testAC10d_operatorStatusReadyForMinimalNoCountContract();
