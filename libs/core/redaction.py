@@ -17,6 +17,8 @@ from typing import Any
 _SECRET_KEYS = frozenset({
     "li_at",
     "jsessionid",
+    "csrf_token",
+    "csrf-token",
     "auth_json",
     "cookie",
     "cookies",
@@ -37,6 +39,7 @@ _REDACTED = "[REDACTED]"
 _SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(li_at\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(jsessionid\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
+    re.compile(r"(csrf[_-]?token\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(authorization\s*[=:]\s*)((?:Bearer|Basic|Token)\s+[^\s;,\"'}{]+|[^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(password\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(api_key\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
