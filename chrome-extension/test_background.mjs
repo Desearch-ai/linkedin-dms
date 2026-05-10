@@ -125,8 +125,8 @@ function buildEnv({ linkedinResponses, linkedinTabs } = {}) {
     },
     scripting: {
       executeScript: async ({ args }) => {
-        const { url, headers } = args[0];
-        const resp = await fakeFetch(url, { method: "GET", headers, credentials: "include", __pageContext: true });
+        const { url, headers, method } = args[0];
+        const resp = await fakeFetch(url, { method: method || "GET", headers, credentials: "include", __pageContext: true });
         return [{ result: { ok: resp.ok, status: resp.status, text: await resp.text() } }];
       },
     },
@@ -795,6 +795,105 @@ async function testAC5h_manualSyncAttempt8ReplaysFromLinkedInPageWithSafeHeaders
   assert(!!findIngestCall(env), "POST /sync/ingest was reached after page-context conversations replay");
 }
 
+async function testAC5i_manualSyncAttempt9ReplaysCapturedGraphQLMethodAndSafeHeaders() {
+  console.log("\nAC5i: MANUAL_SYNC replays Attempt #9 captured GraphQL method/content-type/override without secrets");
+  const env = buildEnv({
+    linkedinResponses: {
+      conversations: (url, options) => {
+        const headers = Object.fromEntries(Object.entries(options.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (!options.__pageContext) return { __error__: 400, __text__: "service worker origin rejected" };
+        if (options.method !== "POST") return { __error__: 400, __text__: `bad method ${options.method}` };
+        if (headers["content-type"] !== "application/x-www-form-urlencoded") return { __error__: 400, __text__: "missing captured content-type" };
+        if (headers["x-http-method-override"] !== "GET") return { __error__: 400, __text__: "missing method override" };
+        if (headers.cookie || headers.authorization) return { __error__: 400, __text__: "secret header replayed" };
+        if (variables !== "(mailboxUrn:urn:li:fsd_profile:42)") return { __error__: 400, __text__: "bad variables" };
+        return {
+          data: {
+            messengerConversationsBySyncToken: {
+              elements: [
+                {
+                  entityUrn: "urn:li:msg_conversation:attempt9-1",
+                  conversationName: "Attempt 9 Thread",
+                  conversationParticipants: [],
+                },
+              ],
+              metadata: {},
+            },
+          },
+        };
+      },
+      messages: (url, options) => {
+        const headers = Object.fromEntries(Object.entries(options.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+        const variables = decodeURIComponent(new URL(url).searchParams.get("variables") || "");
+        if (options.method !== "POST") return { __error__: 400, __text__: "messages method mismatch" };
+        if (headers["content-type"] !== "application/x-www-form-urlencoded") return { __error__: 400, __text__: "messages content-type mismatch" };
+        if (headers["x-http-method-override"] !== "GET") return { __error__: 400, __text__: "messages override mismatch" };
+        if (variables !== "(conversationUrn:urn:li:msg_conversation:attempt9-1)") return { __error__: 400, __text__: "messages variables mismatch" };
+        return { data: { messengerMessagesBySyncToken: { elements: [] } } };
+      },
+    },
+  });
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = "SYNC_TRACK";
+  env.storage.csrfToken = "SYNC_CSRF";
+  loadBackground(env);
+
+  const headerListener = env.listeners.onSendHeaders[0];
+  await headerListener.fn({
+    method: "POST",
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      "?queryId=messengerConversations.0d5e6781bbee71c3e51c8843c6519f48&variables=(mailboxUrn:urn%3Ali%3Afsd_profile%3A42)",
+    requestHeaders: [
+      { name: "cookie", value: "li_at=must-not-store; JSESSIONID=must-not-store" },
+      { name: "authorization", value: "Bearer must-not-store" },
+      { name: "content-type", value: "application/x-www-form-urlencoded" },
+      { name: "x-http-method-override", value: "GET" },
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+      { name: "x-li-lang", value: "en_US" },
+      { name: "x-li-page-instance", value: "urn:li:page:d_flagship3_messaging" },
+    ],
+  });
+  await headerListener.fn({
+    method: "POST",
+    url:
+      "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql" +
+      "?queryId=messengerMessages.attempt9&variables=(conversationUrn:urn%3Ali%3Amsg_conversation%3Aattempt9-1)",
+    requestHeaders: [
+      { name: "content-type", value: "application/x-www-form-urlencoded" },
+      { name: "x-http-method-override", value: "GET" },
+      { name: "x-li-track", value: "SYNC_TRACK" },
+      { name: "csrf-token", value: "SYNC_CSRF" },
+      { name: "x-li-lang", value: "en_US" },
+      { name: "x-li-page-instance", value: "urn:li:page:d_flagship3_messaging" },
+    ],
+  });
+
+  const contract = env.storage.messagingContract || {};
+  assert(contract.conversationsReplayRequest?.method === "POST", "captured conversations POST method is stored as safe replay metadata");
+  assert(contract.conversationsReplayRequest?.queryMode === "url-query", "captured conversations query/body mode is stored");
+  assert(contract.conversationsReplayRequest?.requestShapeHeaders?.["Content-Type"] === "application/x-www-form-urlencoded", "captured content-type is stored with the conversations contract");
+  assert(contract.conversationsReplayRequest?.requestShapeHeaders?.["x-http-method-override"] === "GET", "captured method override is stored with the conversations contract");
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, `Attempt #9 replay succeeds with captured method/header contract (got: ${JSON.stringify(resp)})`);
+
+  const convCall = env.fetchLog.find(f => f.url.includes("queryId=messengerConversations"));
+  assert(!!convCall, "conversations request was made");
+  if (convCall) {
+    const lower = Object.fromEntries(Object.entries(convCall.options.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+    assert(convCall.options.method === "POST", "captured POST method is replayed for conversations");
+    assert(lower["content-type"] === "application/x-www-form-urlencoded", "captured safe content-type is replayed");
+    assert(lower["x-http-method-override"] === "GET", "captured x-http-method-override is replayed");
+    assert(!lower.cookie && !lower.authorization, "cookie/authorization are not replayed");
+  }
+  const storageStr = JSON.stringify(env.storage);
+  assert(!storageStr.includes("must-not-store"), "raw cookie/authorization values were not stored");
+  assert(!!findIngestCall(env), "POST /sync/ingest was reached after Attempt #9 replay");
+}
+
 async function testAC5b_manualSyncIncludesBearerToken() {
   console.log("\nAC5b: MANUAL_SYNC includes Authorization on /sync/ingest when apiToken configured");
   const env = buildEnv();
@@ -1058,6 +1157,9 @@ async function testAC8f_conversationsHttp400IncludesRedactedShapeDiagnostics() {
   assert(error.includes("unsupported variables"), "error includes safe response snippet");
   assert(error.includes("fetch context=linkedin-page-main-world"), "error includes fetch context diagnostics");
   assert(error.includes("replay header names="), "error includes replay header-name diagnostics without values");
+  assert(error.includes("replay method=GET"), "error includes replay method diagnostics");
+  assert(error.includes("url path=/voyager/api/voyagerMessagingGraphQL/graphql"), "error includes URL path diagnostics");
+  assert(error.includes("query/body mode=url-query"), "error includes query/body placement diagnostics");
   assert(!error.includes("ajax:super-secret-csrf-DO-NOT-LEAK"), "captured csrf-token not leaked");
   assert(!error.includes("do-not-leak-track"), "x-li-track not leaked");
   assert(!error.includes("super-secret"), "response secret-like text redacted");
@@ -1288,6 +1390,7 @@ async function main() {
   await testAC5f_manualSyncKeepsPlainIdFallbackForNonFsdEntityUrn();
   await testAC5g_manualSyncReplaysQuotedAttempt7DynamicVariables();
   await testAC5h_manualSyncAttempt8ReplaysFromLinkedInPageWithSafeHeaders();
+  await testAC5i_manualSyncAttempt9ReplaysCapturedGraphQLMethodAndSafeHeaders();
   await testAC5b_manualSyncIncludesBearerToken();
   await testAC5c_extensionDirectionForMyMessages();
   await testAC6_manualRefresh();

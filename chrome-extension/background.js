@@ -26,7 +26,21 @@ const SAFE_LINKEDIN_REPLAY_HEADER_NAMES = new Set([
   "x-li-lang",
   "x-li-page-instance",
   "x-li-deco-include-micro-schema",
+  // Attempt #9 showed LinkedIn's accepted messaging GraphQL request included
+  // these non-secret request-shape headers while replay omitted them. Keep the
+  // allowlist narrow: no cookie/auth/user/session headers are ever captured.
+  "content-type",
+  "x-http-method-override",
 ]);
+const GRAPHQL_REQUEST_SHAPE_HEADER_NAMES = new Set([
+  "content-type",
+  "x-http-method-override",
+]);
+const SAFE_LINKEDIN_REPLAY_METHODS = new Set(["GET", "POST"]);
+const SAFE_METHOD_OVERRIDE_VALUES = new Set(["GET", "POST"]);
+const SAFE_GRAPHQL_CONTENT_TYPE_PREFIXES = [
+  "application/x-www-form-urlencoded",
+];
 const DEFAULT_SAFE_LINKEDIN_REPLAY_HEADERS = {
   "x-li-lang": "en_US",
   "x-li-page-instance": "urn:li:page:d_flagship3_messaging",
@@ -38,10 +52,70 @@ function normalizeHeaderName(name) {
 
 function canonicalLinkedInHeaderName(name) {
   const lower = normalizeHeaderName(name);
+  if (lower === "content-type") return "Content-Type";
+  if (lower === "x-http-method-override") return "x-http-method-override";
   if (lower === "x-li-lang") return "x-li-lang";
   if (lower === "x-li-page-instance") return "x-li-page-instance";
   if (lower === "x-li-deco-include-micro-schema") return "x-li-deco-include-micro-schema";
   return lower;
+}
+
+function normalizeSafeReplayHeaderValue(name, value) {
+  const lower = normalizeHeaderName(name);
+  const trimmed = String(value || "").trim();
+  if (!trimmed || trimmed.length > 500) return null;
+  if (SECRET_VARIABLE_VALUE_PATTERN.test(trimmed) || SECRET_VARIABLE_KEY_PATTERN.test(lower)) return null;
+
+  if (lower === "x-http-method-override") {
+    const method = trimmed.toUpperCase();
+    return SAFE_METHOD_OVERRIDE_VALUES.has(method) ? method : null;
+  }
+
+  if (lower === "content-type") {
+    const contentType = trimmed.toLowerCase();
+    return SAFE_GRAPHQL_CONTENT_TYPE_PREFIXES.some((prefix) => contentType.startsWith(prefix)) ? trimmed : null;
+  }
+
+  return trimmed;
+}
+
+function normalizeSafeLinkedInReplayMethod(method) {
+  const upper = String(method || "GET").trim().toUpperCase();
+  return SAFE_LINKEDIN_REPLAY_METHODS.has(upper) ? upper : "GET";
+}
+
+function detectGraphQLQueryMode(parsedUrl) {
+  return parsedUrl.searchParams.has("queryId") || parsedUrl.searchParams.has("variables") ? "url-query" : "unknown";
+}
+
+function pickGraphQLRequestShapeHeaders(requestHeaders) {
+  const safeHeaders = buildSafeLinkedInReplayHeaders(requestHeaders);
+  const out = {};
+  for (const [name, value] of Object.entries(safeHeaders)) {
+    const lower = normalizeHeaderName(name);
+    if (GRAPHQL_REQUEST_SHAPE_HEADER_NAMES.has(lower)) out[canonicalLinkedInHeaderName(lower)] = value;
+  }
+  return out;
+}
+
+function buildSafeGraphQLReplayRequest(detailsOrUrl) {
+  const details = typeof detailsOrUrl === "string" ? null : detailsOrUrl;
+  const url = typeof detailsOrUrl === "string" ? detailsOrUrl : detailsOrUrl?.url || "";
+  let queryMode = "unknown";
+  let endpointPath = null;
+  try {
+    const parsed = new URL(url);
+    queryMode = detectGraphQLQueryMode(parsed);
+    endpointPath = parsed.pathname || null;
+  } catch (_) {
+    // best effort only
+  }
+  return {
+    method: normalizeSafeLinkedInReplayMethod(details ? details.method : "GET"),
+    queryMode,
+    endpointPath,
+    requestShapeHeaders: pickGraphQLRequestShapeHeaders(details?.requestHeaders || []),
+  };
 }
 
 function redactHeaderNamesForDiagnostics(headers) {
@@ -55,10 +129,9 @@ function buildSafeLinkedInReplayHeaders(requestHeaders) {
   const out = {};
   for (const h of requestHeaders || []) {
     const name = normalizeHeaderName(h && h.name);
-    const value = String((h && h.value) || "").trim();
     if (!SAFE_LINKEDIN_REPLAY_HEADER_NAMES.has(name)) continue;
-    if (!value || value.length > 500) continue;
-    if (SECRET_VARIABLE_VALUE_PATTERN.test(value) || SECRET_VARIABLE_KEY_PATTERN.test(name)) continue;
+    const value = normalizeSafeReplayHeaderValue(name, h && h.value);
+    if (!value) continue;
     out[canonicalLinkedInHeaderName(name)] = value;
   }
   return out;
@@ -178,8 +251,9 @@ function buildVariableTemplate(variablesRaw, kind) {
 
 // Capture the live messaging GraphQL request contract (queryId + variables template)
 // from real LinkedIn browser traffic. Stores only safe metadata — never cookies or auth.
-async function captureMessagingContract(url) {
+async function captureMessagingContract(detailsOrUrl) {
   try {
+    const url = typeof detailsOrUrl === "string" ? detailsOrUrl : detailsOrUrl?.url || "";
     const parsed = new URL(url);
     const queryId = parsed.searchParams.get("queryId") || "";
     const variablesRaw = parsed.searchParams.get("variables") || "";
@@ -189,16 +263,20 @@ async function captureMessagingContract(url) {
     const current = await chrome.storage.local.get({ messagingContract: {} });
     const contract = { ...(current.messagingContract || {}) };
 
+    const replayRequest = buildSafeGraphQLReplayRequest(detailsOrUrl);
+
     if (queryId.startsWith("messengerConversations.")) {
       const variablesTemplate = buildVariableTemplate(variablesRaw, "conversations");
       contract.conversationsQueryId = queryId;
       contract.conversationsVariablesShape = variablesTemplate.map((v) => v.key);
       contract.conversationsVariablesTemplate = variablesTemplate;
+      contract.conversationsReplayRequest = replayRequest;
     } else if (queryId.startsWith("messengerMessages.")) {
       const variablesTemplate = buildVariableTemplate(variablesRaw, "messages");
       contract.messagesQueryId = queryId;
       contract.messagesVariablesShape = variablesTemplate.map((v) => v.key);
       contract.messagesVariablesTemplate = variablesTemplate;
+      contract.messagesReplayRequest = replayRequest;
     } else {
       return;
     }
@@ -373,7 +451,7 @@ chrome.webRequest.onSendHeaders.addListener(
 
     // Record live messaging GraphQL contract (queryId + variables shape) from real traffic.
     if (url.includes(MESSAGING_GRAPHQL_PATH)) {
-      await captureMessagingContract(url);
+      await captureMessagingContract(details);
     }
 
     const safeReplayHeaders = buildSafeLinkedInReplayHeaders(headers);
@@ -661,13 +739,30 @@ function buildLinkedInHeaders(captured = {}) {
   };
   for (const [name, value] of Object.entries(captured.safe_replay_headers || {})) {
     const lower = normalizeHeaderName(name);
-    if (SAFE_LINKEDIN_REPLAY_HEADER_NAMES.has(lower) && value) {
-      headers[canonicalLinkedInHeaderName(lower)] = String(value);
-    }
+    if (!SAFE_LINKEDIN_REPLAY_HEADER_NAMES.has(lower) || !value) continue;
+    if (GRAPHQL_REQUEST_SHAPE_HEADER_NAMES.has(lower)) continue;
+    const safeValue = normalizeSafeReplayHeaderValue(lower, value);
+    if (!safeValue) continue;
+    headers[canonicalLinkedInHeaderName(lower)] = safeValue;
   }
   if (captured.csrf_token) headers["csrf-token"] = captured.csrf_token;
   if (captured.x_li_track) headers["x-li-track"] = captured.x_li_track;
   return headers;
+}
+
+function buildLinkedInReplayRequest(captured = {}, replayRequest = null) {
+  const headers = buildLinkedInHeaders(captured);
+  for (const [name, value] of Object.entries(replayRequest?.requestShapeHeaders || {})) {
+    const lower = normalizeHeaderName(name);
+    if (!GRAPHQL_REQUEST_SHAPE_HEADER_NAMES.has(lower)) continue;
+    const safeValue = normalizeSafeReplayHeaderValue(lower, value);
+    if (!safeValue) continue;
+    headers[canonicalLinkedInHeaderName(lower)] = safeValue;
+  }
+  const method = replayRequest?.method
+    ? normalizeSafeLinkedInReplayMethod(replayRequest.method)
+    : "GET";
+  return { method, headers };
 }
 
 function promiseChromeTabsQuery(query) {
@@ -684,24 +779,40 @@ async function findLinkedInPageTab() {
     || null;
 }
 
-function linkedInReplayDiagnostics(captured, fetchContext) {
+function linkedInReplayDiagnostics(captured, fetchContext, request = {}) {
   const browserNames = Array.isArray(captured.browser_header_names) ? captured.browser_header_names : [];
-  const replayNames = Object.keys(buildLinkedInHeaders(captured)).map(normalizeHeaderName).sort();
-  return `fetch context=${fetchContext}; credentials=include; browser header names=${browserNames.join(",") || "unknown"}; replay header names=${replayNames.join(",") || "none"}`;
+  const replayNames = Object.keys(request.headers || buildLinkedInHeaders(captured))
+    .map(normalizeHeaderName)
+    .sort();
+  const method = normalizeSafeLinkedInReplayMethod(request.method || "GET");
+  let urlPath = "unknown";
+  let replayQueryMode = "unknown";
+  try {
+    const parsed = new URL(request.url || "");
+    urlPath = parsed.pathname || "unknown";
+    replayQueryMode = detectGraphQLQueryMode(parsed);
+  } catch (_) {
+    // best effort only
+  }
+  const capturedQueryMode = request.capturedQueryMode || "unknown";
+  const queryMode = capturedQueryMode === "unknown" || capturedQueryMode === replayQueryMode
+    ? replayQueryMode
+    : `${capturedQueryMode}->${replayQueryMode}`;
+  return `fetch context=${fetchContext}; credentials=include; replay method=${method}; url path=${urlPath}; query/body mode=${queryMode}; browser header names=${browserNames.join(",") || "unknown"}; replay header names=${replayNames.join(",") || "none"}`;
 }
 
-async function executeLinkedInPageFetch(tabId, url, headers) {
+async function executeLinkedInPageFetch(tabId, url, request) {
   if (!chrome.scripting || !chrome.scripting.executeScript) {
     throw new Error("chrome.scripting is unavailable for LinkedIn page-context fetch");
   }
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [{ url, headers }],
-    func: async ({ url, headers }) => {
+    args: [{ url, method: request.method, headers: request.headers }],
+    func: async ({ url, method, headers }) => {
       try {
         const resp = await fetch(url, {
-          method: "GET",
+          method,
           headers,
           credentials: "include",
         });
@@ -721,16 +832,18 @@ async function executeLinkedInPageFetch(tabId, url, headers) {
   return { ...result, fetchContext: "linkedin-page-main-world" };
 }
 
-async function fetchLinkedInJson(url, captured, label) {
-  const headers = buildLinkedInHeaders(captured);
+async function fetchLinkedInJson(url, captured, label, replayRequest = null) {
+  const request = buildLinkedInReplayRequest(captured, replayRequest);
+  request.url = url;
+  request.capturedQueryMode = replayRequest?.queryMode || "unknown";
   const tab = await findLinkedInPageTab();
   let result;
   if (tab && tab.id !== undefined && tab.id !== null) {
-    result = await executeLinkedInPageFetch(tab.id, url, headers);
+    result = await executeLinkedInPageFetch(tab.id, url, request);
   } else {
     const resp = await fetch(url, {
-      method: "GET",
-      headers,
+      method: request.method,
+      headers: request.headers,
       credentials: "include",
     });
     result = { ok: resp.ok, status: resp.status, text: await resp.text(), fetchContext: "extension-service-worker" };
@@ -749,7 +862,7 @@ async function fetchLinkedInJson(url, captured, label) {
     status: result.status,
     text: result.text || "",
     data,
-    diagnostics: linkedInReplayDiagnostics(captured, result.fetchContext),
+    diagnostics: linkedInReplayDiagnostics(captured, result.fetchContext, request),
   };
 }
 
@@ -808,7 +921,7 @@ async function fetchConversationsPage(mailboxUrn, contract, captured) {
   );
   const path = contract.endpointPath || "/voyager/api/voyagerMessagingGraphQL/graphql";
   const url = `${VOYAGER_BASE}${path}?queryId=${encodeURIComponent(contract.conversationsQueryId)}&variables=${encodeURIComponent(variables)}`;
-  const resp = await fetchLinkedInJson(url, captured, "conversations");
+  const resp = await fetchLinkedInJson(url, captured, "conversations", contract.conversationsReplayRequest || null);
   if (resp.status === 429 || resp.status === 999) return { rateLimited: true, data: null };
   if (!resp.ok) {
     throw new Error(buildLinkedInGraphQLError("conversations", resp.status, contract, variables, resp.text, resp.diagnostics));
@@ -824,7 +937,7 @@ async function fetchMessagesPage(conversationUrn, contract, captured) {
   );
   const path = contract.endpointPath || "/voyager/api/voyagerMessagingGraphQL/graphql";
   const url = `${VOYAGER_BASE}${path}?queryId=${encodeURIComponent(contract.messagesQueryId)}&variables=${encodeURIComponent(variables)}`;
-  const resp = await fetchLinkedInJson(url, captured, "messages");
+  const resp = await fetchLinkedInJson(url, captured, "messages", contract.messagesReplayRequest || null);
   if (resp.status === 429 || resp.status === 999) return { rateLimited: true, data: null };
   if (!resp.ok) {
     throw new Error(buildLinkedInGraphQLError("messages", resp.status, contract, variables, resp.text, resp.diagnostics));
