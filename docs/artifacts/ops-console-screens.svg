@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="980" viewBox="0 0 1440 980" role="img" aria-label="LinkedIn Ops Console required screens screenshot sheet">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#173a66"/><stop offset="0.35" stop-color="#071019"/><stop offset="1" stop-color="#071019"/></linearGradient>
+    <style>
+      .panel{fill:#101b2a;stroke:#263853;stroke-width:2}.panel2{fill:#14243a;stroke:#263853;stroke-width:2}.text{fill:#ecf4ff;font:700 22px Inter,system-ui}.small{fill:#9fb1c8;font:16px Inter,system-ui}.tiny{fill:#9fb1c8;font:13px Inter,system-ui}.eyebrow{fill:#69a7ff;font:900 13px Inter,system-ui;letter-spacing:2px}.good{fill:#74e4ae}.warn{fill:#ffd37a}.danger{fill:#ff7d94}.button{fill:#69a7ff}.button2{fill:#223654;stroke:#263853;stroke-width:2}.dark{fill:#0a1523;stroke:#263853;stroke-width:2}.mono{fill:#c3d9ff;font:13px ui-monospace,Menlo,monospace}
+    </style>
+  </defs>
+  <rect width="1440" height="980" fill="url(#bg)"/>
+  <text x="48" y="64" class="eyebrow">LOCAL OPERATOR CONSOLE</text>
+  <text x="48" y="108" class="text" font-size="44">LinkedIn Ops Console</text>
+  <text x="48" y="138" class="small">Synthetic screenshot sheet showing all required UI surfaces. Data is redacted/mock only.</text>
+
+  <rect x="980" y="38" width="410" height="150" rx="18" class="panel"/>
+  <text x="1004" y="72" class="eyebrow">TOKEN / AUTH CONFIGURATION</text>
+  <rect x="1004" y="90" width="168" height="34" rx="8" class="dark"/><text x="1016" y="113" class="tiny">API base: 127.0.0.1</text>
+  <rect x="1186" y="90" width="74" height="34" rx="8" class="dark"/><text x="1204" y="113" class="tiny">Acct 1</text>
+  <rect x="1004" y="134" width="250" height="34" rx="8" class="dark"/><text x="1016" y="156" class="tiny">Bearer token optional</text>
+  <text x="1004" y="178" class="tiny">No cookies, browser headers, or raw secrets displayed.</text>
+
+  <g transform="translate(48 210)">
+    <rect width="320" height="96" rx="18" class="panel"/><text x="20" y="32" class="small">Service</text><text x="20" y="64" class="text">linkedin-dms</text><text x="20" y="84" class="tiny">/ops/status · schema 5</text>
+    <rect x="344" width="320" height="96" rx="18" class="panel"/><text x="364" y="32" class="small">Account Health</text><text x="364" y="64" class="text good">ok</text><text x="364" y="84" class="tiny">Session present; refresh guidance if failed</text>
+    <rect x="688" width="320" height="96" rx="18" class="panel"/><text x="708" y="32" class="small">Send Guard</text><text x="708" y="64" class="text warn">Approval required</text><text x="708" y="84" class="tiny">Controls disabled until approved</text>
+    <rect x="1032" width="320" height="96" rx="18" class="panel"/><text x="1052" y="32" class="small">Sync Status</text><text x="1052" y="64" class="text">42 threads</text><text x="1052" y="84" class="tiny">1,204 messages; local cache</text>
+  </g>
+
+  <g transform="translate(48 338)">
+    <rect width="520" height="430" rx="20" class="panel"/>
+    <text x="24" y="38" class="eyebrow">INBOX &amp; SEARCH</text><text x="24" y="72" class="text">Synced conversations</text>
+    <rect x="350" y="28" width="138" height="38" rx="10" class="button2"/><text x="372" y="53" class="tiny">Dry-run sync</text>
+    <rect x="24" y="94" width="290" height="38" rx="10" class="dark"/><text x="40" y="119" class="tiny">Search local messages</text>
+    <rect x="326" y="94" width="84" height="38" rx="10" class="dark"/><text x="346" y="119" class="tiny">All</text>
+    <rect x="422" y="94" width="66" height="38" rx="10" class="button"/><text x="432" y="119" fill="#06101d" font="800 13px Inter">Search</text>
+    <rect x="24" y="154" width="464" height="74" rx="14" class="panel2"/><text x="44" y="184" class="text" font-size="18">Ada Lovelace</text><text x="44" y="207" class="small">Thanks, this is helpful.</text><text x="360" y="207" class="tiny">in · ready</text>
+    <rect x="24" y="242" width="464" height="74" rx="14" class="panel2"/><text x="44" y="272" class="text" font-size="18">Grace Hopper</text><text x="44" y="295" class="small">...Bittensor subnet...</text><text x="360" y="295" class="tiny">search match</text>
+    <rect x="24" y="330" width="464" height="70" rx="14" fill="none" stroke="#263853" stroke-dasharray="8 8"/><text x="44" y="370" class="small">Empty/loading/error states include next action guidance.</text>
+  </g>
+
+  <g transform="translate(596 338)">
+    <rect width="796" height="430" rx="20" class="panel"/>
+    <text x="24" y="38" class="eyebrow">THREAD / CONTACT DETAIL</text><text x="24" y="72" class="text">Ada Lovelace</text>
+    <rect x="634" y="34" width="132" height="30" rx="15" fill="none" stroke="#263853"/><text x="660" y="54" class="tiny good">14 local messages</text>
+    <rect x="24" y="96" width="420" height="56" rx="18" fill="#203650"/><text x="44" y="120" class="tiny">Ada · 2026-05-10</text><text x="44" y="141" class="small">Thanks, this is helpful.</text>
+    <rect x="346" y="166" width="420" height="56" rx="18" fill="#244c3a"/><text x="366" y="190" class="tiny">out · 2026-05-10</text><text x="366" y="211" class="small">Great — Tuesday works.</text>
+    <rect x="24" y="250" width="742" height="150" rx="16" fill="#0b1725" stroke="#263853"/>
+    <text x="44" y="282" class="text" font-size="18">Draft Approval</text><text x="44" y="306" class="small">Local draft only; send waits for approval evidence.</text>
+    <rect x="44" y="322" width="210" height="36" rx="10" class="dark"/><text x="58" y="345" class="tiny">recipient URN</text>
+    <rect x="266" y="322" width="270" height="36" rx="10" class="dark"/><text x="280" y="345" class="tiny">reviewed reply body</text>
+    <rect x="548" y="322" width="94" height="36" rx="10" class="button"/><text x="566" y="345" fill="#06101d" font="800 13px Inter">Draft</text>
+    <rect x="650" y="322" width="92" height="36" rx="10" class="button2" opacity="0.55"/><text x="666" y="345" class="tiny warn">Send disabled</text>
+    <text x="44" y="384" class="mono">approval_id: appr_20260510_000031 · external_writes: 0</text>
+  </g>
+
+  <g transform="translate(48 800)">
+    <rect width="655" height="132" rx="20" class="panel"/>
+    <text x="24" y="38" class="eyebrow">CAMPAIGN / SYNC STATUS</text><text x="24" y="72" class="text">Dry-run surface</text>
+    <text x="24" y="102" class="small">No campaigns configured. Dry-run reports planned actions and external_writes: 0.</text>
+    <rect x="480" y="36" width="142" height="38" rx="10" class="button2"/><text x="500" y="60" class="tiny">Campaign dry-run</text>
+  </g>
+  <g transform="translate(737 800)">
+    <rect width="655" height="132" rx="20" class="panel"/>
+    <text x="24" y="38" class="eyebrow">AUDIT / OUTBOUND HISTORY</text><text x="24" y="72" class="text">Recent evidence</text>
+    <text x="24" y="102" class="small">draft.created · approval.approved · outbound sends table with redacted errors.</text>
+    <rect x="482" y="36" width="138" height="38" rx="10" class="button2"/><text x="502" y="60" class="tiny">Copy evidence</text>
+  </g>
+</svg>

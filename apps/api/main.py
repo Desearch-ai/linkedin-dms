@@ -5,12 +5,14 @@ import logging
 import httpx
 import os
 import secrets
+from pathlib import Path
 from dataclasses import replace
 from datetime import datetime
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
@@ -34,6 +36,20 @@ logger = logging.getLogger(__name__)
 configure_logging()
 
 app = FastAPI(title="Desearch LinkedIn DMs", version="0.0.2")
+
+_UI_DIR = Path(__file__).resolve().parents[1] / "ui"
+if _UI_DIR.exists():
+    app.mount("/console/assets", StaticFiles(directory=str(_UI_DIR)), name="ops-console-assets")
+
+
+@app.get("/console", include_in_schema=False)
+@app.get("/console/", include_in_schema=False)
+def ops_console_ui():
+    """Serve the local browser-based Ops Console shell."""
+    index_path = _UI_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Ops Console UI assets not found")
+    return FileResponse(index_path)
 
 storage = Storage()
 storage.migrate()

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LinkedIn Ops Console</title>
+  <link rel="stylesheet" href="/console/assets/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Local operator console</p>
+      <h1>LinkedIn Ops Console</h1>
+      <p class="lede">Browse synced DMs, approve drafts, and audit outbound activity without exposing session secrets.</p>
+    </div>
+    <form id="settings-form" class="settings-card" autocomplete="off">
+      <label>
+        API base
+        <input id="api-base" name="apiBase" type="url" value="http://127.0.0.1:8899" />
+      </label>
+      <label>
+        Account ID
+        <input id="account-id" name="accountId" type="number" min="1" value="1" />
+      </label>
+      <label>
+        Bearer token <span class="muted">optional local API auth</span>
+        <input id="api-token" name="apiToken" type="password" placeholder="Paste local token; never stored server-side" />
+      </label>
+      <button type="submit">Reload console</button>
+      <p class="tiny">If requests return 401, set <code>DESEARCH_API_TOKEN</code> for the API and paste the same token here. Cookie and browser header refresh stays in <code>POST /accounts/refresh</code>, not this UI.</p>
+    </form>
+  </header>
+
+  <main>
+    <section class="status-grid" aria-label="Service status">
+      <article class="metric-card" id="service-card"><span>Service</span><strong>Loading…</strong><small>Checking /ops/status</small></article>
+      <article class="metric-card" id="health-card"><span>Account Health</span><strong>Loading…</strong><small>Auth/session readiness</small></article>
+      <article class="metric-card warning"><span>Send Guard</span><strong>Approval required</strong><small>Mutation controls start disabled/dry-run</small></article>
+      <article class="metric-card" id="sync-card"><span>Sync Status</span><strong>Loading…</strong><small>Local cache counters</small></article>
+    </section>
+
+    <section class="console-layout">
+      <aside class="panel thread-panel" aria-labelledby="inbox-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Inbox & Search</p>
+            <h2 id="inbox-heading">Synced conversations</h2>
+          </div>
+          <button id="sync-dry-run" class="secondary" type="button">Dry-run sync</button>
+        </div>
+        <form id="search-form" class="filter-row" autocomplete="off">
+          <input id="search-query" name="query" type="search" placeholder="Search local messages" />
+          <select id="direction-filter" name="direction" aria-label="Direction filter">
+            <option value="">All</option>
+            <option value="in">Inbound</option>
+            <option value="out">Outbound</option>
+          </select>
+          <button type="submit">Search</button>
+        </form>
+        <div id="thread-list" class="list loading" aria-live="polite">Loading thread previews…</div>
+      </aside>
+
+      <section class="panel detail-panel" aria-labelledby="thread-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Thread / Contact Detail</p>
+            <h2 id="thread-heading">Select a conversation</h2>
+          </div>
+          <span id="thread-health" class="badge">Local cache</span>
+        </div>
+        <div id="message-list" class="timeline empty">No thread selected. Pick a synced conversation to view local message history.</div>
+        <form id="draft-form" class="draft-card" autocomplete="off">
+          <h3>Draft Approval</h3>
+          <p class="muted">Creating a draft is local-only. Sending remains disabled until an approval record matches account, recipient, text hash, and idempotency key.</p>
+          <label>Recipient or conversation URN<input id="draft-recipient" required placeholder="urn:li:fsd_profile:…" /></label>
+          <label>Draft body<textarea id="draft-text" rows="4" required placeholder="Write an operator-reviewed reply"></textarea></label>
+          <label>Idempotency key<input id="draft-idempotency" placeholder="linkedin-dm-YYYY-MM-DD-001" /></label>
+          <div class="action-row">
+            <button id="create-draft" type="submit">Create local draft</button>
+            <button id="approve-draft" type="button" class="secondary" disabled>Approve selected draft</button>
+            <button id="send-approved" type="button" class="danger" disabled>Send approved draft</button>
+          </div>
+          <output id="draft-output" class="output">No drafts awaiting approval.</output>
+        </form>
+      </section>
+    </section>
+
+    <section class="bottom-grid">
+      <article class="panel" aria-labelledby="campaign-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Campaign / Sync Status</p>
+            <h2 id="campaign-heading">Dry-run surface</h2>
+          </div>
+          <button id="campaign-dry-run" class="secondary" type="button">Run campaign dry-run</button>
+        </div>
+        <div id="campaign-status" class="state-card empty">No campaigns configured. Use dry-run mode first; campaign sends are not enabled from this console.</div>
+      </article>
+
+      <article class="panel" aria-labelledby="audit-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Audit / Outbound History</p>
+            <h2 id="audit-heading">Recent evidence</h2>
+          </div>
+          <button id="export-evidence" class="secondary" type="button">Copy redacted evidence</button>
+        </div>
+        <div id="audit-list" class="list loading">Loading audit events and outbound-send history…</div>
+      </article>
+    </section>
+  </main>
+
+  <template id="empty-template"><div class="empty">No synced conversations yet. Run sync from the API/extension or use the dry-run button to validate settings; sync reads LinkedIn and never sends.</div></template>
+  <script src="/console/assets/app.js" defer></script>
+</body>
+</html>
