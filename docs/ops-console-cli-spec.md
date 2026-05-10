@@ -435,6 +435,7 @@ If approval evidence is missing or mismatched, the command must exit non-zero an
 
 - **Purpose:** local-first triage of synced threads and messages.
 - **Primary data:** `GET /ops/inbox`, `GET /ops/search`, `GET /threads`, `GET /threads/{thread_id}/messages`.
+- **Search implementation note:** the shared storage layer currently uses a parameterized SQLite `LIKE` fallback over stored message text instead of FTS5. Responses include `fts: false` so the UI/CLI can surface that search is safe/local but not yet ranked full-text search.
 - **Controls:** account selector, sync status badge, search box, date range, direction filter, thread list, unread/local-health filter.
 - **Primary actions:** open thread, draft reply, copy redacted evidence snippet.
 - **Empty state:** “No synced conversations yet” with a safe CTA to run sync. The CTA explains that sync reads from LinkedIn and does not send messages.
