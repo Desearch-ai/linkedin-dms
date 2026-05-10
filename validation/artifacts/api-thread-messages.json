@@ -1,0 +1,29 @@
+{
+  "account_id": 1,
+  "messages": [
+    {
+      "direction": "in",
+      "id": 1,
+      "platform_message_id": "synthetic-msg-ada-1",
+      "raw_available": true,
+      "sender": "Ada Lovelace",
+      "sent_at": "2026-05-10T09:00:00+00:00",
+      "text": "Interested in Bittensor subnet ops; synthetic cookie li_at=[REDACTED] should redact."
+    },
+    {
+      "direction": "out",
+      "id": 2,
+      "platform_message_id": "synthetic-msg-ada-2",
+      "raw_available": true,
+      "sender": "Desearch Operator",
+      "sent_at": "2026-05-10T09:05:00+00:00",
+      "text": "Thanks Ada \u2014 drafting a local-only follow-up for Objective 73 validation."
+    }
+  ],
+  "ok": true,
+  "page": {
+    "limit": 5,
+    "next_cursor": null
+  },
+  "thread_id": 1
+}

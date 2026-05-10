@@ -1,0 +1,21 @@
+{
+  "account_id": 1,
+  "campaign_id": 73,
+  "last_run": null,
+  "ok": true,
+  "rate_limit": {
+    "daily_cap": 25,
+    "next_safe_send_at": null,
+    "remaining_today": 25,
+    "sent_today": 0
+  },
+  "state": "active",
+  "totals": {
+    "approved": 1,
+    "drafted": 0,
+    "failed": 0,
+    "prospects": 1,
+    "sent": 0,
+    "skipped": 0
+  }
+}

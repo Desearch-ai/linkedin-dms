@@ -1,0 +1,12 @@
+{
+  "approved": false,
+  "error": {
+    "code": "approval_required",
+    "message": "Approved draft evidence is required before sending.",
+    "redacted": true,
+    "retryable": false
+  },
+  "external_writes": 0,
+  "ok": false,
+  "status": "rejected"
+}

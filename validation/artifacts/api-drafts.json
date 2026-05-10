@@ -1,0 +1,23 @@
+{
+  "account_id": 1,
+  "drafts": [
+    {
+      "account_id": 1,
+      "campaign_id": 73,
+      "created_at": "2026-05-10T14:22:32.836882+00:00",
+      "id": 1,
+      "idempotency_key": "obj73-approved-synthetic",
+      "preview": "Synthetic approved draft; do not send externally.",
+      "recipient": "urn:li:msg_conversation:(synthetic,ada)",
+      "state": "approved",
+      "text_sha256": "a230015bcb3e87435eeddc755ad93f9a380efeac3a93362da5f687ce740cbf8b",
+      "thread_id": 1,
+      "updated_at": "2026-05-10T14:22:32.837297+00:00"
+    }
+  ],
+  "ok": true,
+  "page": {
+    "limit": 10,
+    "next_cursor": null
+  }
+}
