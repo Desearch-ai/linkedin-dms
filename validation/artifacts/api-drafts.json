@@ -4,20 +4,7 @@
     {
       "account_id": 1,
       "campaign_id": 73,
-      "created_at": "2026-05-10T14:05:57.637530+00:00",
-      "id": 2,
-      "idempotency_key": "obj73-cli-draft",
-      "preview": "Synthetic local draft from CLI validation; no external send.",
-      "recipient": "urn:li:msg_conversation:(synthetic,grace)",
-      "state": "draft",
-      "text_sha256": "4453671943aef2793251f037d484c72a9905f8abba86df2aed12a4ea47b1855b",
-      "thread_id": 2,
-      "updated_at": "2026-05-10T14:05:57.637530+00:00"
-    },
-    {
-      "account_id": 1,
-      "campaign_id": 73,
-      "created_at": "2026-05-10T14:05:37.472393+00:00",
+      "created_at": "2026-05-10T14:22:32.836882+00:00",
       "id": 1,
       "idempotency_key": "obj73-approved-synthetic",
       "preview": "Synthetic approved draft; do not send externally.",
@@ -25,7 +12,7 @@
       "state": "approved",
       "text_sha256": "a230015bcb3e87435eeddc755ad93f9a380efeac3a93362da5f687ce740cbf8b",
       "thread_id": 1,
-      "updated_at": "2026-05-10T14:05:37.472981+00:00"
+      "updated_at": "2026-05-10T14:22:32.837297+00:00"
     }
   ],
   "ok": true,

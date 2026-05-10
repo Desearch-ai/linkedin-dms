@@ -3,22 +3,8 @@
   "events": [
     {
       "account_id": 1,
-      "actor": "operator",
-      "created_at": "2026-05-10T14:05:57.638348+00:00",
-      "entity_id": "2",
-      "entity_type": "draft_reply",
-      "event_type": "draft.created",
-      "id": 4,
-      "payload": {
-        "approval_id": "appr_20260510_000002",
-        "draft_id": 2,
-        "text_sha256": "4453671943aef2793251f037d484c72a9905f8abba86df2aed12a4ea47b1855b"
-      }
-    },
-    {
-      "account_id": 1,
       "actor": "objective-73-local-validation",
-      "created_at": "2026-05-10T14:05:37.475465+00:00",
+      "created_at": "2026-05-10T14:22:32.838461+00:00",
       "entity_id": "objective-73",
       "entity_type": "validation",
       "event_type": "validation.seeded",
@@ -31,7 +17,7 @@
     {
       "account_id": 1,
       "actor": "objective-73-local-validation",
-      "created_at": "2026-05-10T14:05:37.473245+00:00",
+      "created_at": "2026-05-10T14:22:32.837490+00:00",
       "entity_id": "appr_20260510_000001",
       "entity_type": "send_approval",
       "event_type": "approval.approved",
@@ -44,7 +30,7 @@
     {
       "account_id": 1,
       "actor": "operator",
-      "created_at": "2026-05-10T14:05:37.472642+00:00",
+      "created_at": "2026-05-10T14:22:32.837096+00:00",
       "entity_id": "1",
       "entity_type": "draft_reply",
       "event_type": "draft.created",
@@ -61,14 +47,14 @@
     {
       "account_id": 1,
       "attempts": 1,
-      "created_at": "2026-05-10T14:05:37.474353+00:00",
+      "created_at": "2026-05-10T14:22:32.838156+00:00",
       "id": 1,
       "idempotency_key": "obj73-failed-synthetic",
       "last_error": "synthetic validation failure row; no external send attempted",
       "platform_message_id": null,
       "recipient": "urn:li:msg_conversation:(synthetic,grace)",
       "status": "failed",
-      "updated_at": "2026-05-10T14:05:37.474717+00:00"
+      "updated_at": "2026-05-10T14:22:32.838321+00:00"
     }
   ],
   "page": {

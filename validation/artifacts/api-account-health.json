@@ -1,6 +1,6 @@
 {
   "account_id": 1,
-  "checked_at": "2026-05-10T14:08:45.629221+00:00",
+  "checked_at": "2026-05-10T14:22:44.800331+00:00",
   "counts": {
     "messages": 3,
     "outbound_sends": 1,
@@ -15,7 +15,7 @@
   "outbound_summary": {
     "failed": {
       "count": 1,
-      "last_at": "2026-05-10T14:05:37.474717+00:00"
+      "last_at": "2026-05-10T14:22:32.838321+00:00"
     }
   },
   "proxy": {

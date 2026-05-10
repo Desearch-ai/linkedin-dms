@@ -1,0 +1,95 @@
+{
+  "checks": [
+    {
+      "expected": 200,
+      "name": "health",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "ops-status",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "account-health",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "inbox",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "search",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "thread-detail",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "thread-messages",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "sync-dry-run",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "campaign-status",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "campaign-dry-run",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "drafts",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "approvals",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "audit",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 200,
+      "name": "validation",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "expected": 409,
+      "name": "send-approved-refusal",
+      "ok": true,
+      "status": 409
+    }
+  ],
+  "ok": true
+}
