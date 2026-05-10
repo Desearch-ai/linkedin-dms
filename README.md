@@ -229,11 +229,33 @@ secrets, browser CSRF material, or local API auth values.
 
 ## Running the CLI
 
-The CLI uses the same storage and provider stack as the API.
+The CLI uses the same SQLite storage and provider stack as the API, but is safe-by-default for operator workflows. Browsing, search, status, drafts, and campaign dry-runs are local-only. Live sends are approval-gated and refuse to run unless an approved local approval record matches the exact account, recipient, text hash, and idempotency key.
 
 ```bash
-python -m apps.cli sync --account-id 1
-python -m apps.cli send --account-id 1 --recipient 'urn:li:fsd_profile:123' --text 'Hello'
+# Local status and account readiness
+python -m apps.cli status --db-path ./desearch_linkedin_dms.sqlite
+python -m apps.cli auth status --account-id 1
+
+# Sync reads LinkedIn and writes local cache; pagination defaults to one page per thread
+python -m apps.cli sync --account-id 1 --limit-per-thread 50
+python -m apps.cli sync --account-id 1 --dry-run
+
+# Local inbox/search/detail inspection
+python -m apps.cli inbox --account-id 1 --limit 25 --json
+python -m apps.cli search --account-id 1 --query bittensor --direction in --json
+python -m apps.cli threads list --account-id 1 --limit 25 --json
+python -m apps.cli threads show --account-id 1 --thread-id 10 --include-messages --json
+python -m apps.cli messages list --account-id 1 --thread-id 10 --json
+
+# Local draft only; this does not send to LinkedIn
+python -m apps.cli draft-reply --account-id 1 --recipient 'urn:li:fsd_profile:123' --text 'Hello' --idempotency-key linkedin-dm-2026-05-10-001
+
+# Campaign execution is dry-run only in this phase
+python -m apps.cli campaign status --campaign-id 5 --account-id 1
+python -m apps.cli campaign run --campaign-id 5 --account-id 1 --dry-run
+
+# Live send requires explicit approved evidence; text alone is rejected
+python -m apps.cli send --approved appr_20260510_000031 --account-id 1 --recipient 'urn:li:fsd_profile:123' --text 'Hello' --idempotency-key linkedin-dm-2026-05-10-001
 ```
 
 Useful sync options:
@@ -243,13 +265,22 @@ Useful sync options:
 - `--exhaust-pagination`
 - `--delay-threads SEC`
 - `--delay-pages SEC`
+- `--dry-run`
 
 CLI pagination behavior matches the API:
 - default effective behavior is one page per thread
 - `--max-pages-per-thread N` sets an explicit cap
 - `--exhaust-pagination` follows cursors until exhaustion
 
-Useful send option:
+Useful read/detail options:
+- `--json` for machine-readable output (the CLI emits JSON on success by default)
+- `--limit N` and `--cursor CURSOR` for local pagination
+- `--unread`/`--unread-only` on inbox (currently no local unread state is tracked)
+- `--from`, `--to`, and `--direction in|out` on search
+
+Useful send options:
+- `--approved APPROVAL_ID` (required for live sends)
+- `--draft-id ID` to source recipient/body from a stored draft
 - `--idempotency-key KEY`
 
 ## Account authentication input
@@ -319,7 +350,7 @@ Set `max_pages_per_thread` to `null` in the API or pass `--exhaust-pagination` i
 
 ## Send behavior
 
-`POST /send` and `python -m apps.cli send` both call `libs.core.job_runner.run_send()`.
+`POST /send`, `/ops/send-approved`, and the CLI ultimately call `libs.core.job_runner.run_send()`, but the operator CLI only exposes the approval-gated path.
 
 Current behavior:
 - creates or reuses an outbound send record before calling LinkedIn
@@ -327,6 +358,7 @@ Current behavior:
 - retries transient network errors and backs off on rate limiting
 - stores successful outbound messages in both `outbound_sends` and `messages`
 - exposes historical send records through `GET /sends`
+- requires `python -m apps.cli send --approved APPROVAL_ID ...`; without approved state the CLI exits non-zero before loading the provider
 
 ## Storage summary
 
@@ -337,8 +369,13 @@ The SQLite database currently contains these tables:
 - `sync_cursors`
 - `schema_version`
 - `outbound_sends`
+- `draft_replies`
+- `send_approvals`
+- `campaigns`
+- `campaign_recipients`
+- `ops_audit_events`
 
-Migrations also add message direction constraints, indexes, and the `outbound_sends(account_id, status)` lookup path used by `GET /sends`.
+Migrations also add message direction constraints, indexes, the `outbound_sends(account_id, status)` lookup path used by `GET /sends`, and local Ops Console tables for drafts, approvals, campaign dry-run state, and redacted audit evidence.
 
 ## Security notes
 
