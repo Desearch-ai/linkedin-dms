@@ -20,7 +20,12 @@ async function getConfig() {
 
 const SECRET_VARIABLE_KEY_PATTERN = /(cookie|csrf|authorization|password|secret|li_at|jsessionid|(?:auth|access|refresh|bearer)[_-]?token)/i;
 const SECRET_VARIABLE_VALUE_PATTERN = /(li_at=|JSESSIONID=|Authorization\s*[:=]|Bearer\s+)/i;
-const TIMESTAMP_VARIABLE_KEY_PATTERN = /(createdBefore|createdAfter|deliveredBefore|deliveredAfter|beforeTime|afterTime|timestamp)$/i;
+const TIMESTAMP_VARIABLE_KEY_PATTERN = /(createdBefore|createdAfter|createdAt|deliveredBefore|deliveredAfter|deliveredAt|beforeTime|afterTime|timestamp)$/i;
+const CURSOR_VARIABLE_KEY_PATTERN = /^(cursor|nextCursor|previousCursor|prevCursor|syncToken|pageToken|paginationToken|paginationCursor)$/i;
+const COUNT_BEFORE_VARIABLE_KEY_PATTERN = /^countBefore$/i;
+const COUNT_AFTER_VARIABLE_KEY_PATTERN = /^countAfter$/i;
+const DEFAULT_GRAPHQL_FIRST_PAGE_COUNT = 20;
+const DEFAULT_GRAPHQL_FIRST_PAGE_COUNT_AFTER = 0;
 const SECRET_HEADER_NAME_PATTERN = /^(cookie|authorization|proxy-authorization)$/i;
 const SAFE_LINKEDIN_REPLAY_HEADER_NAMES = new Set([
   "x-li-lang",
@@ -197,6 +202,10 @@ function isSecretVariable({ key, rawValue }) {
   return SECRET_VARIABLE_KEY_PATTERN.test(key) || SECRET_VARIABLE_VALUE_PATTERN.test(rawValue || "");
 }
 
+function isCursorVariableKey(key) {
+  return CURSOR_VARIABLE_KEY_PATTERN.test(String(key || ""));
+}
+
 function safeTemplateWrapper(value) {
   const s = String(value || "");
   if (!s || s.length > 40) return "";
@@ -240,9 +249,16 @@ function buildVariableTemplate(variablesRaw, kind) {
     if (key === "mailboxUrn") return buildDynamicVariableEntry(key, "mailboxUrn", rawValue);
     if (key === "conversationUrn") return buildDynamicVariableEntry(key, "conversationUrn", rawValue);
     if (key === "count") {
-      return { key, source: "count", defaultValue: normalizeGraphQLScalar(rawValue) || 20 };
+      return { key, source: "count", defaultValue: DEFAULT_GRAPHQL_FIRST_PAGE_COUNT };
+    }
+    if (COUNT_BEFORE_VARIABLE_KEY_PATTERN.test(key)) {
+      return { key, source: "countBefore", defaultValue: DEFAULT_GRAPHQL_FIRST_PAGE_COUNT };
+    }
+    if (COUNT_AFTER_VARIABLE_KEY_PATTERN.test(key)) {
+      return { key, source: "countAfter", defaultValue: DEFAULT_GRAPHQL_FIRST_PAGE_COUNT_AFTER };
     }
     if (TIMESTAMP_VARIABLE_KEY_PATTERN.test(key)) return { key, source: "now" };
+    if (isCursorVariableKey(key)) return { key, source: "cursor", optional: true };
     return { key, value: normalizeGraphQLScalar(rawValue) };
   });
   const requiredDynamicKey = kind === "conversations" ? "mailboxUrn" : "conversationUrn";
@@ -330,7 +346,8 @@ function redactOperatorText(value) {
     .replace(/(JSESSIONID=)[^;\s]+/gi, "$1[redacted]")
     .replace(/(csrf-token|csrf_token|csrf)[:=]\s*[^;\s,}]+/gi, "$1=[redacted]")
     .replace(/(Authorization[:=]\s*Bearer\s+)[^\s]+/gi, "$1[redacted]")
-    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]");
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
+    .replace(/((?:nextCursor|previousCursor|prevCursor|cursor|syncToken|pageToken|paginationToken|paginationCursor)\s*[:=]\s*)[^;,\s)]+/gi, "$1[redacted]");
 }
 
 async function setStatus(status, error = null, action = null) {
@@ -529,8 +546,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 const VOYAGER_ME_URL = "https://www.linkedin.com/voyager/api/me";
 const VOYAGER_BASE = "https://www.linkedin.com";
 const CONTRACT_FRESHNESS_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
-const INGEST_CONVERSATIONS_PER_PAGE = 20; // First-MVP first page only.
-const INGEST_MESSAGES_PER_THREAD = 20; // First-MVP first-page only.
+const INGEST_CONVERSATIONS_PER_PAGE = DEFAULT_GRAPHQL_FIRST_PAGE_COUNT; // First-MVP first page only.
+const INGEST_MESSAGES_PER_THREAD = DEFAULT_GRAPHQL_FIRST_PAGE_COUNT; // First-MVP first-page only.
 
 function isContractFresh(contract) {
   if (!contract) return false;
@@ -564,7 +581,10 @@ function renderGraphQLVariableValue(entry, replacements) {
   if (entry.source === "mailboxUrn") return wrapDynamicGraphQLValue(entry, replacements.mailboxUrn);
   if (entry.source === "conversationUrn") return wrapDynamicGraphQLValue(entry, replacements.conversationUrn);
   if (entry.source === "count") return replacements.count ?? entry.defaultValue ?? entry.value;
+  if (entry.source === "countBefore") return replacements.countBefore ?? replacements.count ?? entry.defaultValue;
+  if (entry.source === "countAfter") return replacements.countAfter ?? entry.defaultValue ?? DEFAULT_GRAPHQL_FIRST_PAGE_COUNT_AFTER;
   if (entry.source === "now") return Date.now();
+  if (entry.source === "cursor") return replacements[entry.key] ?? replacements.cursor;
   return entry.value;
 }
 
@@ -579,6 +599,7 @@ function buildGraphQLVariables(template, replacements, label) {
     if (!entry || !entry.key) continue;
     const value = renderGraphQLVariableValue(entry, replacements);
     if (value === undefined || value === null || value === "") {
+      if (entry.optional) continue;
       throw new Error(
         `Captured ${label} messaging contract is missing value for ${entry.key}. Open LinkedIn Messaging to refresh the request contract, then retry Sync.`
       );
@@ -598,6 +619,7 @@ function describeTemplateEntry(entry) {
   const attrs = [];
   if (entry.source) attrs.push(`source=${entry.source}`);
   if (entry.rawPrefix || entry.rawSuffix) attrs.push("wrapped");
+  if (entry.optional) attrs.push("optional");
   if (Object.prototype.hasOwnProperty.call(entry, "value")) attrs.push("static");
   return attrs.length ? `${entry.key}{${attrs.join(",")}}` : entry.key;
 }
@@ -612,10 +634,19 @@ function redactGraphQLVariablesForDiagnostics(variables) {
     if (key === "mailboxUrn") return `${key}:[runtime-mailboxUrn]`;
     if (key === "conversationUrn") return `${key}:[runtime-conversationUrn]`;
     if (TIMESTAMP_VARIABLE_KEY_PATTERN.test(key)) return `${key}:[runtime-timestamp]`;
+    if (isCursorVariableKey(key)) return `${key}:[runtime-cursor]`;
     const value = truncateDiagnostic(redactOperatorText(rawValue), 80);
     return `${key}:${value || "[empty]"}`;
   });
   return `(${parts.join(",")})`;
+}
+
+function optionalVariablesOmittedFromRender(template, variables) {
+  if (!Array.isArray(template)) return [];
+  const renderedKeys = new Set(parseGraphQLVariables(variables).map((pair) => pair.key));
+  return template
+    .filter((entry) => entry?.optional && entry.key && !renderedKeys.has(entry.key))
+    .map((entry) => entry.key);
 }
 
 function buildLinkedInGraphQLError(label, status, contract, variables, responseText, replayDiagnostics = "") {
@@ -625,10 +656,12 @@ function buildLinkedInGraphQLError(label, status, contract, variables, responseT
   const templateShape = Array.isArray(template)
     ? template.map(describeTemplateEntry).filter(Boolean).join(",")
     : "unknown";
+  const omittedOptional = optionalVariablesOmittedFromRender(template, variables).join(",");
+  const omittedPart = omittedOptional ? ` omitted optional variables=${omittedOptional};` : "";
   const safeResponse = truncateDiagnostic(redactOperatorText(responseText || ""));
   const responsePart = safeResponse ? ` response="${safeResponse}";` : "";
   const replayPart = replayDiagnostics ? ` ${replayDiagnostics};` : "";
-  return `LinkedIn ${label} request failed (${status}): queryId=${queryId || "unknown"}; variable keys/order=${variableKeys || "none"}; template=${templateShape || "none"}; rendered variables=${redactGraphQLVariablesForDiagnostics(variables)};${responsePart}${replayPart} refresh LinkedIn Messaging to recapture the live contract if this shape is no longer accepted.`;
+  return `LinkedIn ${label} request failed (${status}): queryId=${queryId || "unknown"}; variable keys/order=${variableKeys || "none"}; template=${templateShape || "none"}; rendered variables=${redactGraphQLVariablesForDiagnostics(variables)};${omittedPart}${responsePart}${replayPart} refresh LinkedIn Messaging to recapture the live contract if this shape is no longer accepted.`;
 }
 
 function buildOperatorNextAction({ backendReady, accountReady, hasTrack, hasCsrf, hasContract, contractFresh, lastError, serviceUrl }) {
