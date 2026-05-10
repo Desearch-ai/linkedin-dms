@@ -1,0 +1,23 @@
+{
+  "api": {
+    "auth_required": false,
+    "configured_url": "http://127.0.0.1:8899",
+    "reachable": true
+  },
+  "counts": {
+    "accounts": 1,
+    "messages": 3,
+    "outbound_sends": 1,
+    "pending_approvals": 1,
+    "threads": 2
+  },
+  "db": {
+    "path": "./desearch_linkedin_dms.sqlite",
+    "reachable": true,
+    "schema_version": 5
+  },
+  "ok": true,
+  "service": "linkedin-dms",
+  "version": "0.0.2",
+  "warnings": []
+}

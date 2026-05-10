@@ -1,0 +1,1 @@
+uv run python -m apps.cli send --account-id 1 --recipient urn:li:msg_conversation:(synthetic,ada) --text Refusal proof: missing approval --idempotency-key obj73-refuse-missing --db-path validation/local-test.sqlite

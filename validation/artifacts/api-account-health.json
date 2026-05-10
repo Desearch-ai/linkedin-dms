@@ -1,0 +1,31 @@
+{
+  "account_id": 1,
+  "checked_at": "2026-05-10T14:08:45.629221+00:00",
+  "counts": {
+    "messages": 3,
+    "outbound_sends": 1,
+    "pending_approvals": 1,
+    "threads": 2
+  },
+  "error": null,
+  "label": "objective-73-synthetic",
+  "last_sync": null,
+  "next_action": null,
+  "ok": true,
+  "outbound_summary": {
+    "failed": {
+      "count": 1,
+      "last_at": "2026-05-10T14:05:37.474717+00:00"
+    }
+  },
+  "proxy": {
+    "configured": false
+  },
+  "session": {
+    "expires_at": null,
+    "has_browser_context": false,
+    "has_jsessionid": true,
+    "has_li_at": true
+  },
+  "status": "ok"
+}

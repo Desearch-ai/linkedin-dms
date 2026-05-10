@@ -1,0 +1,1 @@
+uv run python -m apps.cli send --approved appr_20260510_000001 --account-id 1 --recipient urn:li:msg_conversation:(synthetic,ada) --text Tampered text should fail approval hash before provider --idempotency-key obj73-approved-synthetic --db-path validation/local-test.sqlite

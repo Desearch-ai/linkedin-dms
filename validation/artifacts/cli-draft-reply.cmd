@@ -1,0 +1,1 @@
+uv run python -m apps.cli draft-reply --account-id 1 --thread-id 2 --db-path validation/local-test.sqlite --text Synthetic local draft from CLI validation; no external send. --campaign-id 73 --idempotency-key obj73-cli-draft --json

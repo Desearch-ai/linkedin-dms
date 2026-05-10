@@ -1,0 +1,34 @@
+{
+  "console_messages": [
+    {
+      "text": "[DOM] Input elements should have autocomplete attributes (suggested: \"new-password\"): (More info: https://goo.gl/9p2vKq) %o",
+      "type": "verbose"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "type": "error"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "type": "error"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "type": "error"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "type": "error"
+    }
+  ],
+  "network_errors": [],
+  "screenshots": {
+    "ui-account-health-sync-status.png": "validation/artifacts/ui-account-health-sync-status.png",
+    "ui-audit-outbound-history.png": "validation/artifacts/ui-audit-outbound-history.png",
+    "ui-campaign-sync-status.png": "validation/artifacts/ui-campaign-sync-status.png",
+    "ui-draft-approval.png": "validation/artifacts/ui-draft-approval.png",
+    "ui-full-console.png": "validation/artifacts/ui-full-console.png",
+    "ui-inbox-search.png": "validation/artifacts/ui-inbox-search.png",
+    "ui-thread-detail.png": "validation/artifacts/ui-thread-detail.png"
+  }
+}

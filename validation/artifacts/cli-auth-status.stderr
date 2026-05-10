@@ -1,0 +1,1 @@
+2026-05-10T18:05:56 WARNING [libs.core.crypto] DESEARCH_ENCRYPTION_KEY not set; auth/proxy stored in plaintext. Generate a key with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

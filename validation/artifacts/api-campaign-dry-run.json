@@ -1,0 +1,14 @@
+{
+  "account_id": 1,
+  "campaign_id": 73,
+  "dry_run": true,
+  "external_writes": 0,
+  "ok": true,
+  "planned_actions": [],
+  "summary": {
+    "blocked_missing_auth": 0,
+    "blocked_not_approved": 0,
+    "blocked_rate_limit": 0,
+    "would_send_if_approved": 0
+  }
+}

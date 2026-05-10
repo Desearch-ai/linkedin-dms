@@ -1,0 +1,27 @@
+{
+  "account_id": 1,
+  "filters": {
+    "direction": "in",
+    "from": null,
+    "to": null
+  },
+  "fts": false,
+  "ok": true,
+  "page": {
+    "limit": 5,
+    "next_cursor": null
+  },
+  "query": "Bittensor",
+  "results": [
+    {
+      "direction": "in",
+      "message_id": 1,
+      "platform_message_id": "synthetic-msg-ada-1",
+      "sender": "Ada Lovelace",
+      "sent_at": "2026-05-10T09:00:00+00:00",
+      "text_snippet": "Interested in Bittensor subnet ops; synthetic cookie li_at=[REDACTED] should redact.",
+      "thread_id": 1,
+      "title": "Ada Lovelace (synthetic)"
+    }
+  ]
+}

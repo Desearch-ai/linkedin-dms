@@ -1,0 +1,41 @@
+Using CPython 3.12.12
+Creating virtual environment at: .venv
+Resolved 35 packages in 17ms
+   Building desearch-dms @ file:///private/tmp/mc-task-1398-linkedin-dms
+      Built desearch-dms @ file:///private/tmp/mc-task-1398-linkedin-dms
+Prepared 1 package in 787ms
+Installed 34 packages in 50ms
+ + annotated-doc==0.0.4
+ + annotated-types==0.7.0
+ + anyio==4.13.0
+ + certifi==2026.4.22
+ + cffi==2.0.0
+ + click==8.3.3
+ + cryptography==48.0.0
+ + desearch-dms==0.0.1 (from file:///private/tmp/mc-task-1398-linkedin-dms)
+ + fastapi==0.136.1
+ + greenlet==3.5.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httptools==0.7.1
+ + httpx==0.28.1
+ + idna==3.13
+ + iniconfig==2.3.0
+ + packaging==26.2
+ + playwright==1.59.0
+ + pluggy==1.6.0
+ + pycparser==3.0
+ + pydantic==2.13.4
+ + pydantic-core==2.46.4
+ + pyee==13.0.1
+ + pygments==2.20.0
+ + pytest==9.0.3
+ + python-dotenv==1.2.2
+ + pyyaml==6.0.3
+ + starlette==1.0.0
+ + typing-extensions==4.15.0
+ + typing-inspection==0.4.2
+ + uvicorn==0.46.0
+ + uvloop==0.22.1
+ + watchfiles==1.1.1
+ + websockets==16.0

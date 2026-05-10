@@ -1,0 +1,16 @@
+{
+  "counts": {
+    "accounts": 1,
+    "messages": 3,
+    "outbound_sends": 1,
+    "pending_approvals": 1,
+    "threads": 2
+  },
+  "objective": "o-73-build-a-wacli.sh-inspired-linkedin-ops-console-w",
+  "ok": true,
+  "safety": {
+    "approved_send_required": true,
+    "drafts_create_external_writes": 0,
+    "read_views_are_local_first": true
+  }
+}
