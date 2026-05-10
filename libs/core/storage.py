@@ -907,6 +907,18 @@ class Storage:
             ).fetchall()
         return {"drafts": [self._draft_payload(r) for r in rows], "page": _page_meta(limit=limit, offset=offset, returned=len(rows))}
 
+    def get_draft_reply(self, *, account_id: int, draft_id: int) -> dict[str, Any]:
+        self._ensure_account_exists(account_id)
+        row = self._conn.execute(
+            "SELECT * FROM draft_replies WHERE account_id=? AND id=?",
+            (account_id, draft_id),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"draft {draft_id} not found for account {account_id}")
+        payload = self._draft_payload(row)
+        payload["text"] = row["text"]
+        return payload
+
     def get_approval(self, approval_id: str) -> dict[str, Any] | None:
         row = self._conn.execute("SELECT * FROM send_approvals WHERE approval_id=?", (approval_id,)).fetchone()
         return dict(row) if row else None
