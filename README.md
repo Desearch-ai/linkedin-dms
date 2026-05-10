@@ -24,10 +24,15 @@ What is still true is that LinkedIn is a moving target. Some parts are implement
 ├─ docs/
 │  ├─ architecture.md
 │  ├─ features.md
-│  └─ known-issues.md
+│  ├─ known-issues.md
+│  └─ ops-console-cli-spec.md
 ├─ scripts/
 └─ tests/
 ```
+
+## Ops Console and CLI spec
+
+The repo-backed Objective 73 specification for the safe operator console, CLI command tree, proposed `/ops/*` API surface, approval gates, and validation evidence format lives in [`docs/ops-console-cli-spec.md`](docs/ops-console-cli-spec.md).
 
 ## Requirements
 
