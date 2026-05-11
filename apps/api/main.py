@@ -580,6 +580,15 @@ class OpsSyncDryRunIn(BaseModel):
     delay_between_pages_s: float = Field(1.5, ge=0, le=60)
 
 
+class OpsSyncRunIn(OpsSyncDryRunIn):
+    confirm_external_read: bool = Field(
+        False,
+        description="Must be true because live sync reads LinkedIn conversations into the local DB.",
+    )
+    x_li_track: str | None = Field(None, description=_X_LI_TRACK_DESC)
+    csrf_token: str | None = Field(None, description=_CSRF_TOKEN_DESC)
+
+
 class DraftReplyIn(BaseModel):
     account_id: int
     thread_id: int | None = None
@@ -687,6 +696,86 @@ def ops_sync_dry_run(body: OpsSyncDryRunIn):
         "external_reads": 0,
         "external_writes": 0,
         "warnings": [],
+    }
+
+
+@app.post("/ops/sync/run", dependencies=[Depends(require_api_auth)])
+def ops_sync_run(body: OpsSyncRunIn):
+    if not body.confirm_external_read:
+        return _ops_error(
+            409,
+            "external_read_confirmation_required",
+            "Live sync reads LinkedIn conversations. Set confirm_external_read=true to continue.",
+            extra={"external_reads": 0, "external_writes": 0},
+        )
+    try:
+        auth = storage.get_account_auth(body.account_id)
+        proxy = storage.get_account_proxy(body.account_id)
+    except KeyError as exc:
+        return _ops_account_not_found(exc)
+    incoming_ctx = BrowserContext(x_li_track=body.x_li_track, csrf_token=body.csrf_token)
+    if not incoming_ctx.is_empty():
+        storage.update_browser_context(body.account_id, incoming_ctx)
+    provider = LinkedInProvider(
+        auth=auth,
+        proxy=proxy,
+        account_id=body.account_id,
+        browser_context=storage.get_browser_context(body.account_id),
+    )
+    sync_config = SyncConfig(
+        delay_between_threads_s=body.delay_between_threads_s,
+        delay_between_pages_s=body.delay_between_pages_s,
+    )
+    try:
+        result = run_sync(
+            account_id=body.account_id,
+            storage=storage,
+            provider=provider,
+            limit_per_thread=body.limit_per_thread,
+            max_pages_per_thread=body.max_pages_per_thread,
+            sync_config=sync_config,
+            x_li_track=body.x_li_track,
+            csrf_token=body.csrf_token,
+        )
+    except PermissionError as exc:
+        detail = redact_string(str(exc))
+        if "POST /accounts/refresh" not in detail:
+            detail = "LinkedIn session expired — re-authenticate via POST /accounts/refresh"
+        return _ops_error(401, "linkedin_session_expired", detail)
+    except (httpx.HTTPStatusError, ConnectionError) as exc:
+        http_exc = _provider_http_exception(exc)
+        return _ops_error(http_exc.status_code, "linkedin_upstream_error", str(http_exc.detail), retryable=http_exc.status_code in (429, 503))
+    except NotImplementedError:
+        return _ops_error(501, "provider_not_implemented", "Provider not implemented. Implement libs/providers/linkedin/provider.py")
+    except (ValueError, RuntimeError, TypeError) as exc:
+        return _ops_error(422, "sync_failed", str(exc))
+    storage.record_ops_audit_event(
+        account_id=body.account_id,
+        event_type="sync.completed",
+        actor="ops-console",
+        entity_type="sync",
+        entity_id=str(body.account_id),
+        payload={
+            "synced_threads": result.synced_threads,
+            "messages_inserted": result.messages_inserted,
+            "messages_skipped_duplicate": result.messages_skipped_duplicate,
+            "pages_fetched": result.pages_fetched,
+            "rate_limited": result.rate_limited,
+            "external_reads": 1,
+            "external_writes": 0,
+        },
+    )
+    return {
+        "ok": True,
+        "account_id": body.account_id,
+        "dry_run": False,
+        "synced_threads": result.synced_threads,
+        "messages_inserted": result.messages_inserted,
+        "messages_skipped_duplicate": result.messages_skipped_duplicate,
+        "pages_fetched": result.pages_fetched,
+        "rate_limited": result.rate_limited,
+        "external_reads": 1,
+        "external_writes": 0,
     }
 
 

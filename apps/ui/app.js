@@ -221,8 +221,12 @@ async function loadStatus() {
   try {
     const status = await api("/ops/status");
     setCard("service-card", status.service, `DB schema ${status.db.schema_version}; auth ${status.api.auth_required ? "enabled" : "off"}`);
+    if (!status.api.auth_required && !state.token) {
+      $("api-token").placeholder = "Auth off: leave this blank";
+    }
   } catch (err) {
     setCard("service-card", "Needs token", err.message);
+    setCard("next-step-card", "Set local API token", "401 means DESEARCH_API_TOKEN is enabled");
   }
 }
 
@@ -230,17 +234,48 @@ async function loadHealth() {
   try {
     const data = await api(`/ops/accounts/${state.accountId}/health`);
     setCard("health-card", data.status || "unknown", data.next_action || `messages ${data.counts?.messages || 0}`);
+    if (data.status !== "ok") {
+      setCard("next-step-card", "Refresh LinkedIn session", data.next_action || "Use the Chrome extension or POST /accounts/refresh");
+    }
   } catch (err) {
     setCard("health-card", "Not ready", err.message);
+    setCard("next-step-card", "Connect LinkedIn", "Create or refresh account 1 first");
   }
 }
 
 async function loadSyncStatus() {
   try {
     const data = await api(`/ops/sync/status?account_id=${state.accountId}`);
-    setCard("sync-card", `${data.counts.threads || 0} threads`, `${data.counts.messages || 0} messages; writes require approval`);
+    const threads = data.counts.threads || 0;
+    const messages = data.counts.messages || 0;
+    setCard("sync-card", `${threads} threads`, `${messages} messages; writes require approval`);
+    if (!threads || !messages) {
+      setCard("next-step-card", "Run Sync now", "Reads LinkedIn DMs into local storage; sends remain blocked");
+    } else {
+      setCard("next-step-card", "Open Inbox/Search", `${threads} synced threads ready locally`);
+    }
   } catch (err) {
     setCard("sync-card", "Unavailable", err.message);
+    setCard("next-step-card", "Fix sync status", err.message);
+  }
+}
+
+async function runLiveSync() {
+  const card = $("campaign-status");
+  const confirmed = window.confirm("Sync now will read LinkedIn conversations into the local database. It will not send messages. Continue?");
+  if (!confirmed) return;
+  card.className = "state-card loading";
+  card.textContent = "Running live LinkedIn read sync…";
+  try {
+    const data = await api("/ops/sync/run", {
+      method: "POST",
+      body: JSON.stringify({ account_id: state.accountId, confirm_external_read: true }),
+    });
+    card.className = "state-card success";
+    card.innerHTML = `<strong>Sync complete.</strong><br>${data.synced_threads} threads checked, ${data.messages_inserted} messages inserted, ${data.messages_skipped_duplicate} duplicates skipped, external writes ${data.external_writes}.`;
+    await Promise.all([loadSyncStatus(), loadInbox(), loadAudit()]);
+  } catch (err) {
+    renderError(card, err.message, err.payload?.error?.code === "external_read_confirmation_required" ? "Confirm the external read before running live sync." : "Refresh LinkedIn session via Chrome/extension or account refresh, then retry.");
   }
 }
 
@@ -343,6 +378,7 @@ $("draft-form").addEventListener("submit", createDraft);
 $("approve-draft").addEventListener("click", approveDraft);
 $("send-approved").addEventListener("click", sendApproved);
 $("sync-dry-run").addEventListener("click", dryRunSync);
+$("sync-now").addEventListener("click", runLiveSync);
 $("campaign-dry-run").addEventListener("click", dryRunCampaign);
 $("export-evidence").addEventListener("click", copyEvidence);
 

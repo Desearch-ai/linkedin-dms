@@ -23,11 +23,11 @@
         <input id="account-id" name="accountId" type="number" min="1" value="1" />
       </label>
       <label>
-        Bearer token <span class="muted">optional local API auth</span>
-        <input id="api-token" name="apiToken" type="password" placeholder="Paste local token; never stored server-side" />
+        Bearer token <span class="muted">only if API auth is enabled</span>
+        <input id="api-token" name="apiToken" type="password" placeholder="Leave blank when Service says auth off" />
       </label>
       <button type="submit">Reload console</button>
-      <p class="tiny">If requests return 401, set <code>DESEARCH_API_TOKEN</code> for the API and paste the same token here. Cookie and browser header refresh stays in <code>POST /accounts/refresh</code>, not this UI.</p>
+      <p class="tiny">Bearer token is not your LinkedIn login. It is only a local API password when the backend says auth is enabled. LinkedIn connection uses saved LinkedIn session cookies or the Chrome extension.</p>
     </form>
   </header>
 
@@ -37,6 +37,7 @@
       <article class="metric-card" id="health-card"><span>Account Health</span><strong>Loading…</strong><small>Auth/session readiness</small></article>
       <article class="metric-card warning"><span>Send Guard</span><strong>Approval required</strong><small>Mutation controls start disabled/dry-run</small></article>
       <article class="metric-card" id="sync-card"><span>Sync Status</span><strong>Loading…</strong><small>Local cache counters</small></article>
+      <article class="metric-card" id="next-step-card"><span>Next Step</span><strong>Loading…</strong><small>Operator readiness</small></article>
     </section>
 
     <section class="console-layout">
@@ -46,7 +47,10 @@
             <p class="eyebrow">Inbox & Search</p>
             <h2 id="inbox-heading">Synced conversations</h2>
           </div>
-          <button id="sync-dry-run" class="secondary" type="button">Dry-run sync</button>
+          <div class="action-row">
+            <button id="sync-dry-run" class="secondary" type="button">Dry-run sync</button>
+            <button id="sync-now" type="button">Sync now</button>
+          </div>
         </div>
         <form id="search-form" class="filter-row" autocomplete="off">
           <input id="search-query" name="query" type="search" placeholder="Search local messages" />
@@ -110,7 +114,7 @@
     </section>
   </main>
 
-  <template id="empty-template"><div class="empty">No synced conversations yet. Run sync from the API/extension or use the dry-run button to validate settings; sync reads LinkedIn and never sends.</div></template>
+  <template id="empty-template"><div class="empty"><strong>No conversations synced yet.</strong><br>Use <b>Sync now</b> to read LinkedIn conversations into the local DB, then refresh Inbox/Search. This never sends messages. If auth fails, refresh the LinkedIn session from Chrome/extension first.</div></template>
   <script src="/console/assets/app.js" defer></script>
 </body>
 </html>

@@ -58,6 +58,7 @@ def test_ops_routes_require_bearer_token(api, monkeypatch):
         ("GET", "/ops/accounts/1/health", None),
         ("POST", "/ops/auth/check", {"account_id": 1}),
         ("POST", "/ops/sync/dry-run", {"account_id": 1}),
+        ("POST", "/ops/sync/run", {"account_id": 1, "confirm_external_read": True}),
         ("GET", "/ops/sync/status?account_id=1", None),
         ("GET", "/ops/inbox?account_id=1", None),
         ("GET", "/ops/search?account_id=1&q=x", None),
@@ -113,6 +114,86 @@ def test_ops_inbox_search_threads_messages_shapes_and_redaction(api):
     assert messages["thread_id"] == tid
     assert messages["messages"][0]["text"].endswith("[REDACTED]")
 
+
+def test_ops_sync_run_requires_explicit_external_read_confirmation(api):
+    client, storage = api
+    aid, _ = _seed(storage)
+
+    resp = client.post("/ops/sync/run", json={"account_id": aid})
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"]["code"] == "external_read_confirmation_required"
+    assert body["external_reads"] == 0
+    assert body["external_writes"] == 0
+
+
+def test_ops_sync_run_executes_read_sync_and_records_redacted_audit(api, monkeypatch):
+    client, storage = api
+    aid, _ = _seed(storage)
+    captured: dict = {}
+
+    def fake_run_sync(**kwargs):
+        captured.update(kwargs)
+        from libs.core.job_runner import SyncResult
+
+        return SyncResult(
+            synced_threads=2,
+            messages_inserted=3,
+            messages_skipped_duplicate=1,
+            pages_fetched=2,
+            rate_limited=False,
+        )
+
+    monkeypatch.setattr("apps.api.main.run_sync", fake_run_sync)
+
+    resp = client.post(
+        "/ops/sync/run",
+        json={
+            "account_id": aid,
+            "confirm_external_read": True,
+            "x_li_track": "TRACK",
+            "csrf_token": "CSRF",
+            "delay_between_threads_s": 0,
+            "delay_between_pages_s": 0,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["synced_threads"] == 2
+    assert body["messages_inserted"] == 3
+    assert body["external_reads"] == 1
+    assert body["external_writes"] == 0
+    assert captured["account_id"] == aid
+    assert captured["x_li_track"] == "TRACK"
+    assert captured["csrf_token"] == "CSRF"
+
+    audit = client.get("/ops/audit", params={"account_id": aid}).json()
+    assert audit["events"][0]["event_type"] == "sync.completed"
+    assert audit["events"][0]["payload"]["messages_inserted"] == 3
+
+
+
+def test_ops_sync_run_provider_failure_returns_redacted_json(api, monkeypatch):
+    client, storage = api
+    aid, _ = _seed(storage)
+
+    def fake_run_sync(**kwargs):
+        raise RuntimeError("LinkedIn /voyager/api/me bootstrap failed li_at=SECRET")
+
+    monkeypatch.setattr("apps.api.main.run_sync", fake_run_sync)
+
+    resp = client.post(
+        "/ops/sync/run",
+        json={"account_id": aid, "confirm_external_read": True},
+    )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "sync_failed"
+    assert "SECRET" not in str(body)
 
 def test_ops_limit_validation_and_draft_flow(api):
     client, storage = api
