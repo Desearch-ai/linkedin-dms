@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .crypto import decrypt_if_encrypted, encrypt_if_configured
+from .discord_fixtures import DISCORD_FIXTURES
 from .models import AccountAuth, BrowserContext, ProxyConfig
 
 
@@ -74,6 +75,86 @@ CREATE INDEX IF NOT EXISTS idx_outbound_sends_account_status ON outbound_sends(a
 
 _MIGRATION_4_BROWSER_CONTEXT = """
 ALTER TABLE accounts ADD COLUMN browser_context_json TEXT;
+"""
+
+_MIGRATION_5_DISCORD_FIXTURES = """
+CREATE TABLE IF NOT EXISTS discord_accounts (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  account_type TEXT NOT NULL,
+  approved_scope TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discord_guilds (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discord_channels (
+  id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  topic TEXT,
+  FOREIGN KEY(guild_id) REFERENCES discord_guilds(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discord_users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  profile_summary TEXT
+);
+
+CREATE TABLE IF NOT EXISTS discord_members (
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  roles_json TEXT NOT NULL,
+  joined_at TEXT NOT NULL,
+  PRIMARY KEY(guild_id, user_id),
+  FOREIGN KEY(guild_id) REFERENCES discord_guilds(id) ON DELETE CASCADE,
+  FOREIGN KEY(user_id) REFERENCES discord_users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discord_messages (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  author_user_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  sent_at TEXT NOT NULL,
+  raw_json TEXT,
+  FOREIGN KEY(account_id) REFERENCES discord_accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY(guild_id) REFERENCES discord_guilds(id) ON DELETE CASCADE,
+  FOREIGN KEY(channel_id) REFERENCES discord_channels(id) ON DELETE CASCADE,
+  FOREIGN KEY(author_user_id) REFERENCES discord_users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discord_lead_signals (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  keyword TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(account_id) REFERENCES discord_accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY(guild_id) REFERENCES discord_guilds(id) ON DELETE CASCADE,
+  FOREIGN KEY(channel_id) REFERENCES discord_channels(id) ON DELETE CASCADE,
+  FOREIGN KEY(message_id) REFERENCES discord_messages(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_discord_channels_guild_id ON discord_channels(guild_id);
+CREATE INDEX IF NOT EXISTS idx_discord_messages_account_id ON discord_messages(account_id);
+CREATE INDEX IF NOT EXISTS idx_discord_messages_guild_channel ON discord_messages(guild_id, channel_id);
+CREATE INDEX IF NOT EXISTS idx_discord_lead_signals_keyword ON discord_lead_signals(keyword);
 """
 
 
@@ -175,6 +256,7 @@ class Storage:
             (2, _MIGRATION_2_MESSAGES_CHECK),
             (3, _MIGRATION_3_OUTBOUND_SENDS),
             (4, _MIGRATION_4_BROWSER_CONTEXT),
+            (5, _MIGRATION_5_DISCORD_FIXTURES),
         ]
         for version, sql in migrations:
             if version > current:
@@ -467,3 +549,307 @@ class Storage:
                 (account_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+    # ------------------------------------------------------------------
+    # Discord Sync fixture-only prototype storage
+    # ------------------------------------------------------------------
+
+    _DISCORD_COUNT_TABLES = {
+        "accounts": "discord_accounts",
+        "guilds": "discord_guilds",
+        "channels": "discord_channels",
+        "users": "discord_users",
+        "members": "discord_members",
+        "messages": "discord_messages",
+        "lead_signals": "discord_lead_signals",
+    }
+
+    def ingest_discord_fixtures(self) -> dict[str, int]:
+        """Upsert the synthetic Discord Sync fixture dataset.
+
+        This deliberately does not accept tokens, cookies, emails, passwords, or
+        live-sync configuration. It is a local seed path for the fixture-only
+        Discord Sync prototype.
+        """
+        data = DISCORD_FIXTURES
+        with self._conn:
+            self._conn.executemany(
+                """
+                INSERT INTO discord_accounts(id, label, account_type, approved_scope, created_at)
+                VALUES (:id, :label, :account_type, :approved_scope, :created_at)
+                ON CONFLICT(id) DO UPDATE SET
+                  label=excluded.label,
+                  account_type=excluded.account_type,
+                  approved_scope=excluded.approved_scope,
+                  created_at=excluded.created_at
+                """,
+                data["accounts"],
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO discord_guilds(id, name, description, created_at)
+                VALUES (:id, :name, :description, :created_at)
+                ON CONFLICT(id) DO UPDATE SET
+                  name=excluded.name,
+                  description=excluded.description,
+                  created_at=excluded.created_at
+                """,
+                data["guilds"],
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO discord_channels(id, guild_id, name, kind, topic)
+                VALUES (:id, :guild_id, :name, :kind, :topic)
+                ON CONFLICT(id) DO UPDATE SET
+                  guild_id=excluded.guild_id,
+                  name=excluded.name,
+                  kind=excluded.kind,
+                  topic=excluded.topic
+                """,
+                data["channels"],
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO discord_users(id, username, display_name, profile_summary)
+                VALUES (:id, :username, :display_name, :profile_summary)
+                ON CONFLICT(id) DO UPDATE SET
+                  username=excluded.username,
+                  display_name=excluded.display_name,
+                  profile_summary=excluded.profile_summary
+                """,
+                data["users"],
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO discord_members(guild_id, user_id, roles_json, joined_at)
+                VALUES (:guild_id, :user_id, :roles_json, :joined_at)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                  roles_json=excluded.roles_json,
+                  joined_at=excluded.joined_at
+                """,
+                [
+                    {**member, "roles_json": json.dumps(member["roles"])}
+                    for member in data["members"]
+                ],
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO discord_messages(
+                  id, account_id, guild_id, channel_id, author_user_id, content, sent_at, raw_json
+                ) VALUES (:id, :account_id, :guild_id, :channel_id, :author_user_id, :content, :sent_at, :raw_json)
+                ON CONFLICT(id) DO UPDATE SET
+                  account_id=excluded.account_id,
+                  guild_id=excluded.guild_id,
+                  channel_id=excluded.channel_id,
+                  author_user_id=excluded.author_user_id,
+                  content=excluded.content,
+                  sent_at=excluded.sent_at,
+                  raw_json=excluded.raw_json
+                """,
+                [
+                    {**message, "raw_json": json.dumps(message.get("raw") or {})}
+                    for message in data["messages"]
+                ],
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO discord_lead_signals(
+                  id, account_id, guild_id, channel_id, message_id, keyword, topic, summary, evidence_json, created_at
+                ) VALUES (
+                  :id, :account_id, :guild_id, :channel_id, :message_id, :keyword, :topic, :summary, :evidence_json, :created_at
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                  account_id=excluded.account_id,
+                  guild_id=excluded.guild_id,
+                  channel_id=excluded.channel_id,
+                  message_id=excluded.message_id,
+                  keyword=excluded.keyword,
+                  topic=excluded.topic,
+                  summary=excluded.summary,
+                  evidence_json=excluded.evidence_json,
+                  created_at=excluded.created_at
+                """,
+                [
+                    {**signal, "evidence_json": json.dumps(signal["evidence"])}
+                    for signal in data["lead_signals"]
+                ],
+            )
+        return self.discord_fixture_counts()
+
+    def discord_fixture_counts(self) -> dict[str, int]:
+        return {
+            key: int(self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for key, table in self._DISCORD_COUNT_TABLES.items()
+        }
+
+    def list_discord_accounts(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT a.*, COUNT(m.id) AS message_count
+            FROM discord_accounts a
+            LEFT JOIN discord_messages m ON m.account_id = a.id
+            GROUP BY a.id
+            ORDER BY a.label
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_discord_guilds(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT g.*, COUNT(DISTINCT c.id) AS channel_count, COUNT(m.id) AS message_count
+            FROM discord_guilds g
+            LEFT JOIN discord_channels c ON c.guild_id = g.id
+            LEFT JOIN discord_messages m ON m.guild_id = g.id
+            GROUP BY g.id
+            ORDER BY g.name
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_discord_channels(self, *, guild_id: str | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if guild_id:
+            where = "WHERE c.guild_id = ?"
+            params.append(guild_id)
+        rows = self._conn.execute(
+            f"""
+            SELECT c.*, g.name AS guild_name, COUNT(m.id) AS message_count
+            FROM discord_channels c
+            JOIN discord_guilds g ON g.id = c.guild_id
+            LEFT JOIN discord_messages m ON m.channel_id = c.id
+            {where}
+            GROUP BY c.id
+            ORDER BY g.name, c.name
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_discord_users(self, *, guild_id: str | None = None) -> list[dict[str, Any]]:
+        if guild_id:
+            rows = self._conn.execute(
+                """
+                SELECT u.*, dm.guild_id, dm.roles_json
+                FROM discord_members dm
+                JOIN discord_users u ON u.id = dm.user_id
+                WHERE dm.guild_id = ?
+                ORDER BY u.display_name
+                """,
+                (guild_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM discord_users ORDER BY display_name").fetchall()
+        return [self._decode_discord_json_columns(dict(row)) for row in rows]
+
+    def list_discord_messages(
+        self,
+        *,
+        account_id: str | None = None,
+        guild_id: str | None = None,
+        channel_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 500:
+            raise ValueError("limit must be between 1 and 500")
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("m.account_id", account_id),
+            ("m.guild_id", guild_id),
+            ("m.channel_id", channel_id),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"""
+            SELECT
+              m.id, m.account_id, a.label AS account_label,
+              m.guild_id, g.name AS guild_name,
+              m.channel_id, c.name AS channel_name,
+              m.author_user_id, u.display_name AS author_display_name, u.username AS author_username,
+              m.content, m.sent_at, m.raw_json
+            FROM discord_messages m
+            JOIN discord_accounts a ON a.id = m.account_id
+            JOIN discord_guilds g ON g.id = m.guild_id
+            JOIN discord_channels c ON c.id = m.channel_id
+            JOIN discord_users u ON u.id = m.author_user_id
+            {where}
+            ORDER BY m.sent_at ASC, m.id ASC
+            LIMIT ?
+            """,
+            [*params, limit],
+        ).fetchall()
+        return [self._decode_discord_json_columns(dict(row)) for row in rows]
+
+    def search_discord_messages(
+        self,
+        query: str,
+        *,
+        account_id: str | None = None,
+        guild_id: str | None = None,
+        channel_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        normalized = query.strip().lower()
+        if not normalized:
+            raise ValueError("query must be non-empty")
+        clauses = ["LOWER(m.content) LIKE ?"]
+        params: list[Any] = [f"%{normalized}%"]
+        for column, value in (
+            ("m.account_id", account_id),
+            ("m.guild_id", guild_id),
+            ("m.channel_id", channel_id),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        rows = self._conn.execute(
+            f"""
+            SELECT
+              m.id, m.account_id, a.label AS account_label,
+              m.guild_id, g.name AS guild_name,
+              m.channel_id, c.name AS channel_name,
+              m.author_user_id, u.display_name AS author_display_name, u.username AS author_username,
+              m.content, m.sent_at, m.raw_json
+            FROM discord_messages m
+            JOIN discord_accounts a ON a.id = m.account_id
+            JOIN discord_guilds g ON g.id = m.guild_id
+            JOIN discord_channels c ON c.id = m.channel_id
+            JOIN discord_users u ON u.id = m.author_user_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY m.sent_at ASC, m.id ASC
+            LIMIT ?
+            """,
+            [*params, limit],
+        ).fetchall()
+        return [self._decode_discord_json_columns(dict(row)) for row in rows]
+
+    def list_discord_lead_signals(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT
+              s.*, a.label AS account_label, g.name AS guild_name, c.name AS channel_name,
+              m.content AS evidence_message
+            FROM discord_lead_signals s
+            JOIN discord_accounts a ON a.id = s.account_id
+            JOIN discord_guilds g ON g.id = s.guild_id
+            JOIN discord_channels c ON c.id = s.channel_id
+            JOIN discord_messages m ON m.id = s.message_id
+            ORDER BY s.created_at ASC, s.id ASC
+            """
+        ).fetchall()
+        return [self._decode_discord_json_columns(dict(row)) for row in rows]
+
+    def _decode_discord_json_columns(self, row: dict[str, Any]) -> dict[str, Any]:
+        if row.get("raw_json") is not None:
+            row["raw"] = json.loads(row.pop("raw_json") or "{}")
+        if row.get("roles_json") is not None:
+            row["roles"] = json.loads(row.pop("roles_json") or "[]")
+        if row.get("evidence_json") is not None:
+            row["evidence"] = json.loads(row.pop("evidence_json") or "[]")
+        return row

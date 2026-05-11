@@ -14,6 +14,7 @@ from typing import Sequence
 
 import httpx
 
+from libs.core.discord_fixtures import DISCORD_COMMANDS
 from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, SyncResult
 from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import configure_logging
@@ -103,6 +104,41 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         metavar="KEY",
         help="Optional idempotency key (same as API)",
     )
+
+
+    p_discord = sub.add_parser("discord", help="Fixture-only Discord Sync prototype commands")
+    discord_sub = p_discord.add_subparsers(dest="discord_command", required=True)
+
+    p_discord_ingest = discord_sub.add_parser("fixture-ingest", help="Seed synthetic Discord Sync fixtures into SQLite")
+    p_discord_ingest.add_argument("--db-path", metavar="PATH", default=None)
+
+    p_discord_accounts = discord_sub.add_parser("list-accounts", help="List fixture Discord accounts")
+    p_discord_accounts.add_argument("--db-path", metavar="PATH", default=None)
+
+    p_discord_guilds = discord_sub.add_parser("list-guilds", help="List fixture Discord guilds")
+    p_discord_guilds.add_argument("--db-path", metavar="PATH", default=None)
+
+    p_discord_channels = discord_sub.add_parser("list-channels", help="List fixture Discord channels")
+    p_discord_channels.add_argument("--db-path", metavar="PATH", default=None)
+    p_discord_channels.add_argument("--guild-id", default=None)
+
+    p_discord_messages = discord_sub.add_parser("list-messages", help="List fixture Discord messages")
+    p_discord_messages.add_argument("--db-path", metavar="PATH", default=None)
+    p_discord_messages.add_argument("--account-id", default=None)
+    p_discord_messages.add_argument("--guild-id", default=None)
+    p_discord_messages.add_argument("--channel-id", default=None)
+    p_discord_messages.add_argument("--limit", type=int, default=50)
+
+    p_discord_search = discord_sub.add_parser("search", help="Search fixture Discord messages")
+    p_discord_search.add_argument("--db-path", metavar="PATH", default=None)
+    p_discord_search.add_argument("--query", required=True)
+    p_discord_search.add_argument("--account-id", default=None)
+    p_discord_search.add_argument("--guild-id", default=None)
+    p_discord_search.add_argument("--channel-id", default=None)
+    p_discord_search.add_argument("--limit", type=int, default=50)
+
+    p_discord_show = discord_sub.add_parser("show-commands", help="Show Discord Sync fixture CLI commands")
+    p_discord_show.add_argument("--db-path", metavar="PATH", default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -241,6 +277,53 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _cmd_discord(storage: Storage | None, args: argparse.Namespace) -> int:
+    subcommand = args.discord_command
+    if subcommand == "show-commands":
+        print(json.dumps({"ok": True, "commands": DISCORD_COMMANDS}))
+        return 0
+    if storage is None:
+        _stderr("error: storage is required for this Discord command")
+        return 1
+    try:
+        if subcommand == "fixture-ingest":
+            print(json.dumps({"ok": True, "counts": storage.ingest_discord_fixtures()}))
+        elif subcommand == "list-accounts":
+            print(json.dumps({"ok": True, "accounts": storage.list_discord_accounts()}))
+        elif subcommand == "list-guilds":
+            print(json.dumps({"ok": True, "guilds": storage.list_discord_guilds()}))
+        elif subcommand == "list-channels":
+            print(json.dumps({"ok": True, "channels": storage.list_discord_channels(guild_id=args.guild_id)}))
+        elif subcommand == "list-messages":
+            print(json.dumps({
+                "ok": True,
+                "messages": storage.list_discord_messages(
+                    account_id=args.account_id,
+                    guild_id=args.guild_id,
+                    channel_id=args.channel_id,
+                    limit=args.limit,
+                ),
+            }))
+        elif subcommand == "search":
+            print(json.dumps({
+                "ok": True,
+                "messages": storage.search_discord_messages(
+                    args.query,
+                    account_id=args.account_id,
+                    guild_id=args.guild_id,
+                    channel_id=args.channel_id,
+                    limit=args.limit,
+                ),
+            }))
+        else:
+            _stderr(f"error: unknown Discord command {subcommand!r}")
+            return 1
+    except ValueError as exc:
+        _stderr(f"error: {exc}")
+        return 1
+    return 0
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse CLI args, run command, return process exit code (0 = success)."""
     configure_logging()
@@ -251,6 +334,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if code is None:
             return 0
         return int(code) if isinstance(code, int) else 1
+
+    if args.command == "discord" and args.discord_command == "show-commands":
+        return _cmd_discord(None, args)
 
     storage: Storage | None = None
     try:
@@ -268,6 +354,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_sync(storage, args)
         if args.command == "send":
             return _cmd_send(storage, args)
+        if args.command == "discord":
+            return _cmd_discord(storage, args)
         _stderr(f"error: unknown command {args.command!r}")
         return 1
     finally:
