@@ -10,9 +10,12 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
+from libs.core.discord_fixtures import DISCORD_COMMANDS
 from libs.core.job_runner import (
     IngestMessage,
     IngestThread,
@@ -36,6 +39,10 @@ app = FastAPI(title="Desearch LinkedIn DMs", version="0.0.2")
 
 storage = Storage()
 storage.migrate()
+
+_UI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ui"))
+if os.path.isdir(_UI_DIR):
+    app.mount("/ui/assets", StaticFiles(directory=_UI_DIR), name="ui-assets")
 
 
 def _get_api_token() -> str | None:
@@ -494,3 +501,82 @@ def list_sends(account_id: int, status: str | None = None):
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     return {"sends": sends}
+
+
+@app.get("/discord/accounts", dependencies=[Depends(require_api_auth)])
+def discord_accounts():
+    """Read-only fixture Discord accounts; no credential or live-sync input accepted."""
+    return {"ok": True, "accounts": storage.list_discord_accounts()}
+
+
+@app.get("/discord/guilds", dependencies=[Depends(require_api_auth)])
+def discord_guilds():
+    return {"ok": True, "guilds": storage.list_discord_guilds()}
+
+
+@app.get("/discord/channels", dependencies=[Depends(require_api_auth)])
+def discord_channels(guild_id: str | None = None):
+    return {"ok": True, "channels": storage.list_discord_channels(guild_id=guild_id)}
+
+
+@app.get("/discord/users", dependencies=[Depends(require_api_auth)])
+def discord_users(guild_id: str | None = None):
+    return {"ok": True, "users": storage.list_discord_users(guild_id=guild_id)}
+
+
+@app.get("/discord/messages", dependencies=[Depends(require_api_auth)])
+def discord_messages(
+    account_id: str | None = None,
+    guild_id: str | None = None,
+    channel_id: str | None = None,
+    limit: int = 50,
+):
+    try:
+        messages = storage.list_discord_messages(
+            account_id=account_id,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"ok": True, "messages": messages}
+
+
+@app.get("/discord/search", dependencies=[Depends(require_api_auth)])
+def discord_search(
+    query: str,
+    account_id: str | None = None,
+    guild_id: str | None = None,
+    channel_id: str | None = None,
+    limit: int = 50,
+):
+    try:
+        messages = storage.search_discord_messages(
+            query,
+            account_id=account_id,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"ok": True, "messages": messages}
+
+
+@app.get("/discord/lead-signals", dependencies=[Depends(require_api_auth)])
+def discord_lead_signals():
+    return {"ok": True, "lead_signals": storage.list_discord_lead_signals()}
+
+
+@app.get("/discord/commands", dependencies=[Depends(require_api_auth)])
+def discord_commands():
+    return {"ok": True, "commands": DISCORD_COMMANDS}
+
+
+@app.get("/discord", include_in_schema=False)
+def discord_ui():
+    index_path = os.path.join(_UI_DIR, "index.html")
+    if not os.path.exists(index_path):
+        raise HTTPException(status_code=404, detail="Discord Sync UI not installed")
+    return FileResponse(index_path)

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Discord Sync Fixture Browser</title>
+    <link rel="stylesheet" href="/ui/assets/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Fixture-only prototype · no Discord credentials</p>
+        <h1>Discord Sync</h1>
+        <p>
+          Browse synthetic approved accounts, guilds, channels, users, messages,
+          keyword signals, and CLI commands before any real Discord sync exists.
+        </p>
+      </section>
+
+      <section class="panel commands">
+        <div>
+          <h2>CLI commands</h2>
+          <p>Seed locally, then browse or search the fixture dataset.</p>
+        </div>
+        <code>discord fixture-ingest</code>
+        <ul id="commands"></ul>
+      </section>
+
+      <section class="grid filters panel">
+        <label>
+          Account
+          <select id="accountFilter"><option value="">All accounts</option></select>
+        </label>
+        <label>
+          Guild
+          <select id="guildFilter"><option value="">All guilds</option></select>
+        </label>
+        <label>
+          Channel
+          <select id="channelFilter"><option value="">All channels</option></select>
+        </label>
+        <label>
+          Search
+          <input id="searchInput" placeholder="validator, lead, search API…" />
+        </label>
+      </section>
+
+      <section class="grid two-col">
+        <div class="panel">
+          <h2>Fixture messages</h2>
+          <div id="messages" class="cards"></div>
+        </div>
+        <div class="panel">
+          <h2>Lead / keyword signals</h2>
+          <div id="signals" class="cards compact"></div>
+        </div>
+      </section>
+    </main>
+    <script src="/ui/assets/app.js"></script>
+  </body>
+</html>
