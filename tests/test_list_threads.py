@@ -669,6 +669,19 @@ class TestGetProfileId:
         # Only one HTTP call — second was cached
         assert mock_client.get.call_count == 1
 
+
+    def test_profile_id_plain_id_int_is_normalized_to_string(self, auth):
+        p = LinkedInProvider(auth=auth)
+        mock_client = MagicMock()
+        mock_client.is_closed = False
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.headers = {"content-type": "application/json"}
+        me_resp.json.return_value = {"data": {"plainId": 12345}}
+        mock_client.get.return_value = me_resp
+        with _patch_client(mock_client):
+            assert p._get_profile_id() == "12345"
+
     def test_profile_id_redirect_raises_permission_error_and_caches_failure(self, auth):
         """Redirected /me bootstrap should stay explicit, not degrade into cached None."""
         p = LinkedInProvider(auth=auth)

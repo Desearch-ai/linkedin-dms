@@ -588,7 +588,7 @@ class LinkedInProvider:
                 "Refresh via POST /accounts/refresh and retry sync."
             ))
 
-        self._profile_id = pid
+        self._profile_id = str(pid)
         self._profile_id_error = None
         self._profile_id_fetched = True
         return self._profile_id

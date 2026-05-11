@@ -24,10 +24,15 @@ What is still true is that LinkedIn is a moving target. Some parts are implement
 ├─ docs/
 │  ├─ architecture.md
 │  ├─ features.md
-│  └─ known-issues.md
+│  ├─ known-issues.md
+│  └─ ops-console-cli-spec.md
 ├─ scripts/
 └─ tests/
 ```
+
+## Ops Console and CLI spec
+
+The repo-backed Objective 73 specification for the safe operator console, CLI command tree, proposed `/ops/*` API surface, approval gates, and validation evidence format lives in [`docs/ops-console-cli-spec.md`](docs/ops-console-cli-spec.md).
 
 ## Requirements
 
@@ -89,6 +94,29 @@ Useful endpoints:
 - `GET /sends?account_id=1`
 
 Swagger UI is available at <http://127.0.0.1:8899/docs>.
+
+## Running the local Ops Console UI
+
+The operator console is served by the FastAPI process; no npm/Vite install is required.
+
+```bash
+uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8899
+open http://127.0.0.1:8899/console
+```
+
+The console calls the shared `/ops/*` API endpoints only. It covers inbox/search,
+thread detail, account health, draft approval, campaign/sync dry-run status, and
+audit/outbound-send history. If `DESEARCH_API_TOKEN` is configured, paste the same
+local bearer token into the console settings card; the token stays in browser
+session storage and is sent only as an `Authorization: Bearer ...` header.
+
+Safety defaults:
+- inbox, thread detail, search, health, sync status, campaign status, and audit
+  views are read-only local API reads
+- sync planning and campaign planning buttons use dry-run endpoints first
+- draft creation is local-only and reports `external_writes: 0`
+- the send button is disabled until a draft is created and approved; actual send
+  calls go through `/ops/send-approved`, which revalidates approval evidence
 
 Security posture for local development:
 - bind to `127.0.0.1`, not `0.0.0.0`
