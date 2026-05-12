@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
@@ -27,6 +28,13 @@ from libs.core.models import AccountAuth, BrowserContext, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider, MAX_MESSAGES_PER_PAGE
+from libs.providers.discord.provider import (
+    DEFAULT_SCOPES,
+    DiscordAPIError,
+    DiscordOAuthConfig,
+    DiscordProvider,
+    token_expires_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +249,66 @@ class SyncIn(BaseModel):
     )
     x_li_track: str | None = Field(None, description=_X_LI_TRACK_DESC)
     csrf_token: str | None = Field(None, description=_CSRF_TOKEN_DESC)
+
+
+class DiscordAccountSyncIn(BaseModel):
+    account_id: int = Field(..., ge=1)
+
+
+class DiscordChannelSyncIn(BaseModel):
+    account_id: int = Field(..., ge=1)
+    guild_id: str = Field(..., min_length=1)
+
+
+class DiscordMessageSyncIn(BaseModel):
+    account_id: int = Field(..., ge=1)
+    channel_id: str = Field(..., min_length=1)
+    limit: int = Field(50, ge=1, le=100)
+    before: str | None = None
+    after: str | None = None
+
+
+def _make_discord_provider() -> DiscordProvider:
+    return DiscordProvider(config=DiscordOAuthConfig.from_env())
+
+
+def _discord_config_status() -> dict:
+    config = DiscordOAuthConfig.from_env()
+    return {
+        "oauth_configured": not config.missing_oauth(),
+        "missing_oauth": config.missing_oauth(),
+        "bot_configured": bool(config.bot_token),
+        "token_persistence_enabled": storage.discord_token_persistence_enabled(),
+        "credential_refs": [
+            "DISCORD_SYNC_CLIENT_ID",
+            "DISCORD_SYNC_CLIENT_SECRET",
+            "DISCORD_SYNC_REDIRECT_URI",
+            "DISCORD_SYNC_BOT_TOKEN",
+        ],
+    }
+
+
+def _record_discord_api_error(
+    *,
+    account_id: int | None,
+    scope: str,
+    exc: DiscordAPIError | RuntimeError,
+    guild_id: str | None = None,
+    channel_id: str | None = None,
+) -> dict:
+    status_code = exc.status_code if isinstance(exc, DiscordAPIError) else None
+    route = exc.route if isinstance(exc, DiscordAPIError) else None
+    message = redact_string(str(exc))
+    storage.record_discord_error(
+        account_id=account_id,
+        scope=scope,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        status_code=status_code,
+        route=route,
+        message=message,
+    )
+    return {"scope": scope, "status_code": status_code, "route": route, "message": message}
 
 
 @app.get("/health")
@@ -494,3 +562,176 @@ def list_sends(account_id: int, status: str | None = None):
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     return {"sends": sends}
+
+@app.get("/discord", response_class=HTMLResponse, dependencies=[Depends(require_api_auth)])
+def discord_ui():
+    """Minimal local UI for live Discord Sync state and actions."""
+    return """
+<!doctype html>
+<html><head><title>Discord Sync</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}button,input{margin:.25rem;padding:.45rem}.badge{background:#eef;border-radius:.5rem;padding:.15rem .4rem}pre{background:#111;color:#eee;padding:1rem;overflow:auto}</style></head>
+<body>
+<h1>Discord Sync <span class="badge">live API MVP</span></h1>
+<p>Fixture mode is not the default path. Connect Discord OAuth, sync user guilds, then app-authorized bot channels/messages.</p>
+<button onclick="call('/discord/auth/status')">Auth/status</button>
+<button onclick="call('/discord/auth/start')">Get connect URL</button>
+<br>
+<input id="account" placeholder="account_id"><input id="guild" placeholder="guild_id"><input id="channel" placeholder="channel_id"><input id="q" placeholder="search">
+<br>
+<button onclick="post('/discord/sync/guilds',{account_id:+account.value})">Sync guilds</button>
+<button onclick="post('/discord/sync/channels',{account_id:+account.value,guild_id:guild.value})">Sync channels</button>
+<button onclick="post('/discord/sync/messages',{account_id:+account.value,channel_id:channel.value,limit:50})">Sync messages</button>
+<button onclick="call('/discord/guilds?account_id='+account.value)">List guilds</button>
+<button onclick="call('/discord/channels?account_id='+account.value+'&guild_id='+guild.value)">List channels</button>
+<button onclick="call('/discord/messages?account_id='+account.value+'&channel_id='+channel.value+'&q='+encodeURIComponent(q.value))">Search messages</button>
+<button onclick="call('/discord/errors?account_id='+account.value)">Errors</button>
+<pre id="out">Ready. Auth/connect state, live-vs-fixture source badges, last sync timestamps, and permission/auth errors render here.</pre>
+<script>async function call(u){let r=await fetch(u); out.textContent=JSON.stringify(await r.json(),null,2)} async function post(u,b){let r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}); out.textContent=JSON.stringify(await r.json(),null,2)}</script>
+</body></html>
+"""
+
+
+@app.get("/discord/auth/status", dependencies=[Depends(require_api_auth)])
+def discord_auth_status():
+    return {"ok": True, "config": _discord_config_status(), "accounts": storage.list_discord_accounts()}
+
+
+@app.get("/discord/auth/start", dependencies=[Depends(require_api_auth)])
+def discord_auth_start():
+    provider = _make_discord_provider()
+    try:
+        state = secrets.token_urlsafe(24)
+        storage.create_discord_oauth_state(state)
+        url = provider.config.authorization_url(state=state, scopes=list(DEFAULT_SCOPES))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=redact_string(str(exc))) from exc
+    finally:
+        provider.close()
+    return {"ok": True, "authorization_url": url, "state": state, "scopes": list(DEFAULT_SCOPES), "config": _discord_config_status()}
+
+
+@app.get("/discord/auth/callback")
+def discord_auth_callback(code: str, state: str):
+    if not storage.consume_discord_oauth_state(state):
+        raise HTTPException(status_code=400, detail="Invalid or already-consumed Discord OAuth state")
+    provider = _make_discord_provider()
+    try:
+        token_payload = provider.exchange_code(code)
+        access_token = token_payload.get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=502, detail="Discord OAuth token response did not include an access token")
+        user = provider.get_current_user(access_token)
+        scopes = str(token_payload.get("scope") or "").split()
+        expires_at = token_expires_at(token_payload)
+        persist_tokens = storage.discord_token_persistence_enabled()
+        status = "connected" if persist_tokens else "connected_token_not_persisted"
+        last_error = None if persist_tokens else "DESEARCH_ENCRYPTION_KEY not configured; Discord OAuth token material was not persisted"
+        token_material = {
+            "access_token": token_payload.get("access_token"),
+            "refresh_token": token_payload.get("refresh_token"),
+            "token_type": token_payload.get("token_type", "Bearer"),
+            "expires_at": expires_at,
+            "scope": token_payload.get("scope"),
+        } if persist_tokens else None
+        account_id = storage.upsert_discord_account(
+            discord_user_id=str(user.get("id")),
+            username=user.get("username"),
+            global_name=user.get("global_name"),
+            scopes=scopes,
+            status=status,
+            token_material=token_material,
+            token_expires_at=expires_at,
+            last_error=last_error,
+        )
+        account = storage.get_discord_account(account_id)
+        logger.info("Discord account connected: %s", redact_for_log({"account_id": account_id, "discord_user_id": user.get("id"), "status": status}))
+        return {"ok": True, "account": account, "token_persistence_enabled": persist_tokens}
+    except DiscordAPIError as exc:
+        raise HTTPException(status_code=502, detail=redact_string(str(exc))) from exc
+    finally:
+        provider.close()
+
+
+@app.post("/discord/sync/guilds", dependencies=[Depends(require_api_auth)])
+def discord_sync_guilds(body: DiscordAccountSyncIn):
+    account = storage.get_discord_account(body.account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Discord account not found")
+    token = storage.get_discord_account_token(body.account_id)
+    if not token or not token.get("access_token"):
+        err = _record_discord_api_error(account_id=body.account_id, scope="guilds", exc=RuntimeError("Discord OAuth access token is not persisted; configure DESEARCH_ENCRYPTION_KEY and reconnect"))
+        return {"ok": False, "upserted": 0, "errors": [err]}
+    provider = _make_discord_provider()
+    try:
+        guilds = provider.list_user_guilds(token["access_token"])
+        for guild in guilds:
+            storage.upsert_discord_guild(account_id=body.account_id, guild=guild, provenance="oauth:guilds")
+        return {"ok": True, "upserted": len(guilds), "guilds": storage.list_discord_guilds(account_id=body.account_id), "errors": []}
+    except DiscordAPIError as exc:
+        err = _record_discord_api_error(account_id=body.account_id, scope="guilds", exc=exc)
+        return {"ok": False, "upserted": 0, "errors": [err]}
+    finally:
+        provider.close()
+
+
+@app.post("/discord/sync/channels", dependencies=[Depends(require_api_auth)])
+def discord_sync_channels(body: DiscordChannelSyncIn):
+    if storage.get_discord_account(body.account_id) is None:
+        raise HTTPException(status_code=404, detail="Discord account not found")
+    provider = _make_discord_provider()
+    try:
+        bot_token = provider.config.require_bot_token()
+        channels = provider.list_guild_channels(body.guild_id, bot_token=bot_token)
+        for channel in channels:
+            storage.upsert_discord_channel(account_id=body.account_id, guild_id=body.guild_id, channel=channel, provenance="bot:guild_channels")
+        return {"ok": True, "upserted": len(channels), "channels": storage.list_discord_channels(account_id=body.account_id, guild_id=body.guild_id), "errors": []}
+    except (DiscordAPIError, RuntimeError) as exc:
+        err = _record_discord_api_error(account_id=body.account_id, guild_id=body.guild_id, scope="channels", exc=exc)
+        return {"ok": False, "upserted": 0, "errors": [err]}
+    finally:
+        provider.close()
+
+
+@app.post("/discord/sync/messages", dependencies=[Depends(require_api_auth)])
+def discord_sync_messages(body: DiscordMessageSyncIn):
+    if storage.get_discord_account(body.account_id) is None:
+        raise HTTPException(status_code=404, detail="Discord account not found")
+    provider = _make_discord_provider()
+    try:
+        bot_token = provider.config.require_bot_token()
+        messages = provider.list_channel_messages(body.channel_id, bot_token=bot_token, limit=body.limit, before=body.before, after=body.after)
+        inserted = 0
+        duplicates = 0
+        for message in messages:
+            if storage.insert_discord_message(account_id=body.account_id, channel_id=body.channel_id, message=message, provenance="bot:channel_messages"):
+                inserted += 1
+            else:
+                duplicates += 1
+        return {"ok": True, "fetched": len(messages), "inserted": inserted, "duplicates": duplicates, "errors": []}
+    except (DiscordAPIError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, DiscordAPIError):
+            err = _record_discord_api_error(account_id=body.account_id, channel_id=body.channel_id, scope="messages", exc=exc)
+        else:
+            err = _record_discord_api_error(account_id=body.account_id, channel_id=body.channel_id, scope="messages", exc=RuntimeError(str(exc)))
+        return {"ok": False, "fetched": 0, "inserted": 0, "duplicates": 0, "errors": [err]}
+    finally:
+        provider.close()
+
+
+@app.get("/discord/guilds", dependencies=[Depends(require_api_auth)])
+def discord_list_guilds(account_id: int):
+    return {"guilds": storage.list_discord_guilds(account_id=account_id)}
+
+
+@app.get("/discord/channels", dependencies=[Depends(require_api_auth)])
+def discord_list_channels(account_id: int, guild_id: str | None = None):
+    return {"channels": storage.list_discord_channels(account_id=account_id, guild_id=guild_id)}
+
+
+@app.get("/discord/messages", dependencies=[Depends(require_api_auth)])
+def discord_list_messages(account_id: int | None = None, channel_id: str | None = None, q: str | None = None, limit: int = 100):
+    return {"messages": storage.list_discord_messages(account_id=account_id, channel_id=channel_id, q=q, limit=min(max(limit, 1), 100))}
+
+
+@app.get("/discord/errors", dependencies=[Depends(require_api_auth)])
+def discord_list_errors(account_id: int | None = None, limit: int = 100):
+    return {"errors": storage.list_discord_errors(account_id=account_id, limit=min(max(limit, 1), 100))}
