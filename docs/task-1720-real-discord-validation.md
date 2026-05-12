@@ -2,8 +2,8 @@
 
 ## PR / QA rejection fix
 
-- `pr_url`: PENDING_CREATE
-- Explicit rejection fix: this attempt creates a real GitHub PR for `Desearch-ai/linkedin-dms`, with code/docs changes and a branch pushed to GitHub. The final artifact is updated with the actual PR URL after creation.
+- `pr_url`: https://github.com/Desearch-ai/linkedin-dms/pull/83
+- Explicit rejection fix: created real GitHub PR https://github.com/Desearch-ai/linkedin-dms/pull/83 for `Desearch-ai/linkedin-dms`, with code/docs changes and a branch pushed to GitHub.
 
 ## Origin
 
@@ -140,6 +140,7 @@ Notes:
 - API `/discord/auth/start` → HTTP 503, accepted expected blocker due missing OAuth refs.
 - CLI `discord auth-status` → 0.
 - CLI `discord auth-url` → exit 1, accepted expected blocker due missing OAuth refs.
+- First GitHub PR-create helper printed the PR URL but exited 1 because I placed a shell pipe on the heredoc terminator; rerun PR lookup exited 0 and confirmed the real PR URL.
 - Headless Chrome screenshot wrote the PNG; Chrome process required SIGTERM after the screenshot was written, documented as non-critical because the artifact exists and runtime/UI HTTP checks passed.
 
 ## Irreversible changes
