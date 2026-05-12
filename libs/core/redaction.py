@@ -47,6 +47,7 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(cookie_header\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(cookies\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(DISCORD_SESSION_COOKIE\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
+    re.compile(r"((?:discord_session|__dcfduid|__sdcfduid|__cfruid|cf_clearance)\s*=\s*)([^;\s]+)", re.IGNORECASE),
     re.compile(r"(x_super_properties\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(authorization\s*[=:]\s*)((?:Bearer|Basic|Token)\s+[^\s;,\"'}{]+|[^\s;,\"'}{]+)", re.IGNORECASE),
     re.compile(r"(password\s*[=:]\s*)([^\s;,\"'}{]+)", re.IGNORECASE),

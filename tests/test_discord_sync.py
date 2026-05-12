@@ -402,6 +402,27 @@ def test_discord_session_redaction_covers_cookie_session_secret_names():
         assert secret not in redacted
     assert redacted.count("[REDACTED]") >= 5
 
+def test_discord_session_auth_prefers_storage_state_and_redacts_cookie_parts(tmp_path):
+    from libs.providers.discord.session_provider import DiscordSessionAuth
+
+    state_path = tmp_path / "discord-state.json"
+    state_path.write_text(json.dumps({
+        "cookies": [
+            {"domain": ".discord.com", "name": "__dcfduid", "value": "state-secret-one"},
+            {"domain": "discord.com", "name": "discord_session", "value": "state-secret-two"},
+            {"domain": "example.com", "name": "not_discord", "value": "outside-secret"},
+        ]
+    }))
+
+    auth = DiscordSessionAuth.from_sources(session_state_path=str(state_path), user_agent="Mozilla/5.0")
+    assert "state-secret-one" in auth.cookie_header
+    assert "state-secret-two" in auth.cookie_header
+    assert "outside-secret" not in auth.cookie_header
+
+    redacted = redact_string(f"cookie_header={auth.cookie_header}")
+    assert "state-secret-one" not in redacted
+    assert "state-secret-two" not in redacted
+
 
 def test_discord_session_provider_uses_read_only_web_gets_and_normalizes_shapes():
     import httpx

@@ -344,13 +344,6 @@ def _record_discord_api_error(
     return {"scope": scope, "status_code": status_code, "route": route, "message": message}
 
 
-def _discord_session_auth_for_account(account_id: int) -> DiscordSessionAuth | None:
-    material = storage.get_discord_account_session(account_id)
-    if not material:
-        return None
-    return DiscordSessionAuth.from_material(material)
-
-
 def _discord_missing_session_error() -> RuntimeError:
     return RuntimeError(
         "Discord session:web material is not persisted; connect with /discord/session/connect after configuring DESEARCH_ENCRYPTION_KEY, "
@@ -640,8 +633,8 @@ def discord_ui():
 <button onclick="call('/discord/auth/status')">Session/auth status</button>
 <button onclick="call('/discord/auth/start')">Optional OAuth URL</button>
 <br>
-<input id="cookie" placeholder="Cookie header for /discord/session/connect"><input id="ua" placeholder="User-Agent optional">
-<button onclick="post('/discord/session/connect',{cookie_header:cookie.value,user_agent:ua.value||null})">Connect session/web</button>
+<input id="statePath" placeholder="session_state_path preferred"><input id="cookie" placeholder="Cookie header fallback"><input id="ua" placeholder="User-Agent optional">
+<button onclick="post('/discord/session/connect',{session_state_path:statePath.value||null,cookie_header:cookie.value||null,user_agent:ua.value||null})">Connect session/web</button>
 <br>
 <input id="account" placeholder="account_id"><input id="guild" placeholder="guild_id"><input id="channel" placeholder="channel_id"><input id="q" placeholder="search">
 <br>
