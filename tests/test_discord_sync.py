@@ -274,3 +274,198 @@ def test_discord_ui_exposes_live_auth_fetch_controls(client):
     assert "/discord/sync/channels" in html
     assert "/discord/sync/messages" in html
     assert "live API MVP" in html
+
+
+def test_discord_session_connect_fetches_identity_and_persists_encrypted_session(client, storage, monkeypatch):
+    monkeypatch.setenv("DESEARCH_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    provider = MagicMock()
+    provider.get_current_user.return_value = {"id": "u-session", "username": "cosmic", "global_name": "Giga"}
+
+    with patch("apps.api.main._make_discord_session_provider", return_value=provider):
+        resp = client.post(
+            "/discord/session/connect",
+            json={"cookie_header": "__dcfduid=session-cookie-value; locale=en-US", "user_agent": "Mozilla/5.0"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["account"]["discord_user_id"] == "u-session"
+    assert body["account"]["status"] == "session_connected"
+    assert body["account"]["scopes"] == ["session:web"]
+    assert body["account"]["token_persisted"] is True
+    assert "session-cookie-value" not in resp.text
+    persisted = storage.get_discord_account_session(body["account"]["id"])
+    assert persisted is not None
+    assert persisted["kind"] == "session:web"
+    assert "session-cookie-value" in persisted["cookie_header"]
+
+
+def test_discord_session_connect_without_encryption_does_not_store_cookie_and_blocks_later_sync(client, storage):
+    provider = MagicMock()
+    provider.get_current_user.return_value = {"id": "u-ephemeral", "username": "cosmic"}
+
+    with patch("apps.api.main._make_discord_session_provider", return_value=provider):
+        resp = client.post("/discord/session/connect", json={"cookie_header": "discord_session=secret-value"})
+
+    assert resp.status_code == 200
+    account = resp.json()["account"]
+    assert account["status"] == "session_connected_not_persisted"
+    assert account["token_persisted"] is False
+    assert "secret-value" not in resp.text
+    assert storage.get_discord_account_session(account["id"]) is None
+
+    sync = client.post("/discord/sync/guilds", json={"account_id": account["id"]})
+    assert sync.status_code == 200
+    assert sync.json()["ok"] is False
+    assert "session:web material is not persisted" in sync.json()["errors"][0]["message"]
+    assert "secret-value" not in sync.text
+
+
+def test_discord_session_sync_guilds_channels_messages_dedupes_and_marks_session_web(client, storage, monkeypatch):
+    monkeypatch.setenv("DESEARCH_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    account_id = storage.upsert_discord_account(
+        discord_user_id="u1",
+        username="cosmic",
+        global_name="Giga",
+        scopes=["session:web"],
+        status="session_connected",
+        token_material={"kind": "session:web", "cookie_header": "discord_session=secret-value", "user_agent": "Mozilla/5.0"},
+        token_expires_at=None,
+    )
+
+    provider = MagicMock()
+    provider.list_user_guilds.return_value = [{"id": "g1", "name": "Desearch", "permissions": "8", "owner": True}]
+    provider.list_guild_channels.return_value = [{"id": "c1", "guild_id": "g1", "name": "general", "type": 0, "parent_id": None}]
+    provider.list_channel_messages.return_value = [
+        {
+            "id": "m1",
+            "channel_id": "c1",
+            "author": {"id": "u2", "username": "alice", "global_name": "Alice"},
+            "content": "hello bittensor",
+            "timestamp": "2026-05-12T08:00:00+00:00",
+        }
+    ]
+
+    with patch("apps.api.main._make_discord_session_provider", return_value=provider):
+        guilds = client.post("/discord/sync/guilds", json={"account_id": account_id})
+        channels = client.post("/discord/sync/channels", json={"account_id": account_id, "guild_id": "g1"})
+        first_messages = client.post("/discord/sync/messages", json={"account_id": account_id, "channel_id": "c1", "limit": 10})
+        second_messages = client.post("/discord/sync/messages", json={"account_id": account_id, "channel_id": "c1", "limit": 10})
+
+    assert guilds.json()["upserted"] == 1
+    assert channels.json()["upserted"] == 1
+    assert first_messages.json()["inserted"] == 1
+    assert second_messages.json()["duplicates"] == 1
+    assert provider.list_guild_channels.call_args.kwargs == {}
+    assert provider.list_channel_messages.call_args.kwargs == {"limit": 10, "before": None, "after": None}
+
+    guild = client.get(f"/discord/guilds?account_id={account_id}").json()["guilds"][0]
+    channel = client.get(f"/discord/channels?account_id={account_id}&guild_id=g1").json()["channels"][0]
+    message = client.get("/discord/messages?channel_id=c1&q=bittensor").json()["messages"][0]
+    assert guild["provenance"] == "session:web"
+    assert channel["provenance"] == "session:web"
+    assert message["provenance"] == "session:web"
+    assert message["source"] == "live"
+
+
+def test_discord_session_permission_errors_are_stored_as_actionable_rows(client, storage, monkeypatch):
+    monkeypatch.setenv("DESEARCH_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    account_id = storage.upsert_discord_account(
+        discord_user_id="u1",
+        username="cosmic",
+        global_name=None,
+        scopes=["session:web"],
+        status="session_connected",
+        token_material={"kind": "session:web", "cookie_header": "discord_session=secret-value"},
+        token_expires_at=None,
+    )
+    provider = MagicMock()
+    provider.list_guild_channels.side_effect = DiscordAPIError(403, "Missing Access cookie_header=secret-value", route="GET /guilds/g1/channels (session:web)")
+
+    with patch("apps.api.main._make_discord_session_provider", return_value=provider):
+        resp = client.post("/discord/sync/channels", json={"account_id": account_id, "guild_id": "g1"})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    errors = client.get("/discord/errors?account_id=" + str(account_id)).json()["errors"]
+    assert errors[0]["scope"] == "channels"
+    assert errors[0]["status_code"] == 403
+    assert "Missing Access" in errors[0]["message"]
+    assert "secret-value" not in resp.text
+    assert "secret-value" not in json.dumps(errors)
+
+
+def test_discord_session_redaction_covers_cookie_session_secret_names():
+    redacted = redact_string("cookie_header=abc cookies=def discord_authorization=ghi DISCORD_SESSION_COOKIE=jkl x_super_properties=mno")
+    for secret in ("abc", "def", "ghi", "jkl", "mno"):
+        assert secret not in redacted
+    assert redacted.count("[REDACTED]") >= 5
+
+def test_discord_session_auth_prefers_storage_state_and_redacts_cookie_parts(tmp_path):
+    from libs.providers.discord.session_provider import DiscordSessionAuth
+
+    state_path = tmp_path / "discord-state.json"
+    state_path.write_text(json.dumps({
+        "cookies": [
+            {"domain": ".discord.com", "name": "__dcfduid", "value": "state-secret-one"},
+            {"domain": "discord.com", "name": "discord_session", "value": "state-secret-two"},
+            {"domain": "example.com", "name": "not_discord", "value": "outside-secret"},
+        ]
+    }))
+
+    auth = DiscordSessionAuth.from_sources(session_state_path=str(state_path), user_agent="Mozilla/5.0")
+    assert "state-secret-one" in auth.cookie_header
+    assert "state-secret-two" in auth.cookie_header
+    assert "outside-secret" not in auth.cookie_header
+
+    redacted = redact_string(f"cookie_header={auth.cookie_header}")
+    assert "state-secret-one" not in redacted
+    assert "state-secret-two" not in redacted
+
+
+def test_discord_session_provider_uses_read_only_web_gets_and_normalizes_shapes():
+    import httpx
+    from libs.providers.discord.session_provider import DiscordSessionAuth, DiscordSessionProvider
+
+    seen: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.headers)))
+        if request.url.path.endswith("/users/@me"):
+            return httpx.Response(200, json={"id": "u1", "username": "cosmic"})
+        if request.url.path.endswith("/users/@me/guilds"):
+            return httpx.Response(200, json=[{"id": "g1", "name": "Desearch"}])
+        if request.url.path.endswith("/guilds/g1/channels"):
+            return httpx.Response(200, json=[{"id": "c1", "name": "general", "type": 0}])
+        if request.url.path.endswith("/channels/c1/messages"):
+            assert request.url.params["limit"] == "25"
+            return httpx.Response(200, json=[{"id": "m1", "content": "hello", "timestamp": "2026-05-12T08:00:00+00:00"}])
+        return httpx.Response(404, json={"message": "not found"})
+
+    provider = DiscordSessionProvider(
+        auth=DiscordSessionAuth(cookie_header="discord_session=secret-value", user_agent="Mozilla/5.0"),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert provider.get_current_user()["id"] == "u1"
+    assert provider.list_user_guilds()[0]["id"] == "g1"
+    assert provider.list_guild_channels("g1")[0]["id"] == "c1"
+    assert provider.list_channel_messages("c1", limit=25)[0]["id"] == "m1"
+    assert {method for method, _, _ in seen} == {"GET"}
+    assert seen[0][2]["cookie"] == "discord_session=secret-value"
+    assert not any(hasattr(provider, name) for name in ("send_message", "create_message", "delete_message", "react", "join_guild"))
+
+
+def test_cli_and_ui_label_discord_as_session_web_not_bot_required(client, capsys):
+    rc = cli_main.main(["discord", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "session-connect" in out
+    assert "session/web" in out
+    assert "bot-authorized" not in out
+
+    html = client.get("/discord").text
+    assert "session/web" in html
+    assert "/discord/session/connect" in html
+    assert "bot-token" not in html.lower()

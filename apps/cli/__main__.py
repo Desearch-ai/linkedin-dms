@@ -26,6 +26,7 @@ from libs.providers.discord.provider import (
     DiscordOAuthConfig,
     DiscordProvider,
 )
+from libs.providers.discord.session_provider import DiscordSessionAuth, DiscordSessionProvider
 
 logger = logging.getLogger(__name__)
 
@@ -111,24 +112,32 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Optional idempotency key (same as API)",
     )
 
-    p_discord = sub.add_parser("discord", help="Live Discord OAuth/app sync commands")
+    p_discord = sub.add_parser("discord", help="Discord session/web read-only sync commands")
     dsub = p_discord.add_subparsers(dest="discord_command", required=True)
 
-    d_auth_url = dsub.add_parser("auth-url", help="Print Discord OAuth connect URL")
+    d_session = dsub.add_parser("session-connect", help="Connect approved local Discord session/web cookies for read-only sync")
+    d_session.add_argument("--db-path", metavar="PATH", default=None)
+    d_session.add_argument("--cookie-header", default=None, help="Approved local Discord Web Cookie header; redacted from logs/output")
+    d_session.add_argument("--session-state-path", default=None, help="Local Playwright/browser storage-state JSON with discord.com cookies")
+    d_session.add_argument("--authorization", default=None, help="Optional approved Discord Web authorization header")
+    d_session.add_argument("--user-agent", default=None)
+    d_session.add_argument("--x-super-properties", default=None)
+
+    d_auth_url = dsub.add_parser("auth-url", help="Print optional Discord OAuth connect URL")
     d_auth_url.add_argument("--db-path", metavar="PATH", default=None)
 
-    dsub.add_parser("auth-status", help="Show connected Discord account/auth state").add_argument("--db-path", metavar="PATH", default=None)
+    dsub.add_parser("auth-status", help="Show connected Discord session/auth state").add_argument("--db-path", metavar="PATH", default=None)
 
-    d_guilds = dsub.add_parser("sync-guilds", help="Fetch OAuth-authorized Discord guilds")
+    d_guilds = dsub.add_parser("sync-guilds", help="Fetch Discord guilds via session/web when connected; OAuth fallback optional")
     d_guilds.add_argument("--db-path", metavar="PATH", default=None)
     d_guilds.add_argument("--account-id", type=int, required=True)
 
-    d_channels = dsub.add_parser("sync-channels", help="Fetch bot-authorized channels for a guild")
+    d_channels = dsub.add_parser("sync-channels", help="Fetch session/web readable channels for a guild; app fallback optional")
     d_channels.add_argument("--db-path", metavar="PATH", default=None)
     d_channels.add_argument("--account-id", type=int, required=True)
     d_channels.add_argument("--guild-id", required=True)
 
-    d_messages = dsub.add_parser("sync-messages", help="Fetch bot-authorized messages for a channel")
+    d_messages = dsub.add_parser("sync-messages", help="Fetch session/web readable messages for a channel; app fallback optional")
     d_messages.add_argument("--db-path", metavar="PATH", default=None)
     d_messages.add_argument("--account-id", type=int, required=True)
     d_messages.add_argument("--channel-id", required=True)
@@ -295,14 +304,17 @@ def _discord_config_payload(storage: Storage) -> dict:
     return {
         "oauth_configured": not config.missing_oauth(),
         "missing_oauth": config.missing_oauth(),
+        "session_web_supported": True,
+        "session_persistence_enabled": storage.discord_token_persistence_enabled(),
         "bot_configured": bool(config.bot_token),
         "token_persistence_enabled": storage.discord_token_persistence_enabled(),
         "credential_refs": [
+            "DESEARCH_ENCRYPTION_KEY",
             "DISCORD_SYNC_CLIENT_ID",
             "DISCORD_SYNC_CLIENT_SECRET",
             "DISCORD_SYNC_REDIRECT_URI",
-            "DISCORD_SYNC_BOT_TOKEN",
         ],
+        "optional_fallback_refs": ["DISCORD_SYNC_BOT_TOKEN"],
     }
 
 
@@ -311,10 +323,55 @@ def _print_json(payload: dict) -> int:
     return 0
 
 
+
+def _discord_account_is_session_web(account: dict) -> bool:
+    return "session:web" in account.get("scopes", []) or str(account.get("status") or "").startswith("session_connected")
+
+
+def _discord_session_provider_for_account(storage: Storage, account_id: int) -> DiscordSessionProvider | None:
+    account = storage.get_discord_account(account_id)
+    if not account or not _discord_account_is_session_web(account):
+        return None
+    material = storage.get_discord_account_session(account_id)
+    if not material:
+        raise RuntimeError("Discord session:web material is not persisted; configure DESEARCH_ENCRYPTION_KEY and reconnect with session-connect")
+    return DiscordSessionProvider(auth=DiscordSessionAuth.from_material(material))
+
 def _cmd_discord(storage: Storage, args: argparse.Namespace) -> int:
     provider = DiscordProvider(config=DiscordOAuthConfig.from_env())
     try:
         command = args.discord_command
+        if command == "session-connect":
+            try:
+                auth = DiscordSessionAuth.from_sources(
+                    cookie_header=args.cookie_header,
+                    session_state_path=args.session_state_path,
+                    authorization=args.authorization,
+                    user_agent=args.user_agent,
+                    x_super_properties=args.x_super_properties,
+                )
+                session_provider = DiscordSessionProvider(auth=auth)
+                try:
+                    user = session_provider.get_current_user()
+                finally:
+                    session_provider.close()
+            except (ValueError, DiscordAPIError) as exc:
+                _stderr("error: " + redact_string(str(exc)))
+                return 1
+            persist_session = storage.discord_token_persistence_enabled()
+            status = "session_connected" if persist_session else "session_connected_not_persisted"
+            account_id = storage.upsert_discord_account(
+                discord_user_id=str(user.get("id")),
+                username=user.get("username"),
+                global_name=user.get("global_name"),
+                scopes=["session:web"],
+                status=status,
+                token_material=auth.to_material() if persist_session else None,
+                token_expires_at=None,
+                last_error=None if persist_session else "DESEARCH_ENCRYPTION_KEY not configured; Discord session:web material was not persisted",
+            )
+            return _print_json({"ok": True, "account": storage.get_discord_account(account_id), "session_persistence_enabled": persist_session})
+
         if command == "auth-url":
             state = secrets.token_urlsafe(24)
             storage.create_discord_oauth_state(state)
@@ -329,44 +386,72 @@ def _cmd_discord(storage: Storage, args: argparse.Namespace) -> int:
             return _print_json({"ok": True, "config": _discord_config_payload(storage), "accounts": storage.list_discord_accounts()})
 
         if command == "sync-guilds":
-            token = storage.get_discord_account_token(args.account_id)
-            if not token or not token.get("access_token"):
-                _stderr("error: Discord OAuth access token is not persisted; configure DESEARCH_ENCRYPTION_KEY and reconnect")
-                return 1
             try:
-                guilds = provider.list_user_guilds(token["access_token"])
-            except DiscordAPIError as exc:
-                storage.record_discord_error(account_id=args.account_id, scope="guilds", message=str(exc), status_code=exc.status_code, route=exc.route)
-                _stderr("error: " + str(exc))
+                session_provider = _discord_session_provider_for_account(storage, args.account_id)
+                if session_provider:
+                    try:
+                        guilds = session_provider.list_user_guilds()
+                    finally:
+                        session_provider.close()
+                    provenance = "session:web"
+                else:
+                    token = storage.get_discord_account_token(args.account_id)
+                    if not token or not token.get("access_token"):
+                        raise RuntimeError("Discord session:web material is not persisted; connect with session-connect")
+                    guilds = provider.list_user_guilds(token["access_token"])
+                    provenance = "oauth:guilds"
+            except (RuntimeError, DiscordAPIError) as exc:
+                storage.record_discord_error(account_id=args.account_id, scope="guilds", message=redact_string(str(exc)), status_code=getattr(exc, "status_code", None), route=getattr(exc, "route", None))
+                _stderr("error: " + redact_string(str(exc)))
                 return 1
             for guild in guilds:
-                storage.upsert_discord_guild(account_id=args.account_id, guild=guild, provenance="oauth:guilds")
+                storage.upsert_discord_guild(account_id=args.account_id, guild=guild, provenance=provenance)
             return _print_json({"ok": True, "upserted": len(guilds)})
 
         if command == "sync-channels":
             try:
-                bot_token = provider.config.require_bot_token()
-                channels = provider.list_guild_channels(args.guild_id, bot_token=bot_token)
+                session_provider = _discord_session_provider_for_account(storage, args.account_id)
+                if session_provider:
+                    try:
+                        channels = session_provider.list_guild_channels(args.guild_id)
+                    finally:
+                        session_provider.close()
+                    provenance = "session:web"
+                else:
+                    bot_token = provider.config.require_bot_token()
+                    channels = provider.list_guild_channels(args.guild_id, bot_token=bot_token)
+                    provenance = "bot:guild_channels"
             except (RuntimeError, DiscordAPIError) as exc:
-                storage.record_discord_error(account_id=args.account_id, scope="channels", guild_id=args.guild_id, message=str(exc), status_code=getattr(exc, "status_code", None), route=getattr(exc, "route", None))
-                _stderr("error: " + redact_string(str(exc)))
+                safe_message = str(exc) if isinstance(exc, DiscordAPIError) else "Discord session:web material is not persisted; connect with session-connect"
+                storage.record_discord_error(account_id=args.account_id, scope="channels", guild_id=args.guild_id, message=redact_string(safe_message), status_code=getattr(exc, "status_code", None), route=getattr(exc, "route", None))
+                _stderr("error: " + redact_string(safe_message))
                 return 1
             for channel in channels:
-                storage.upsert_discord_channel(account_id=args.account_id, guild_id=args.guild_id, channel=channel, provenance="bot:guild_channels")
+                storage.upsert_discord_channel(account_id=args.account_id, guild_id=args.guild_id, channel=channel, provenance=provenance)
             return _print_json({"ok": True, "upserted": len(channels)})
 
         if command == "sync-messages":
             try:
-                bot_token = provider.config.require_bot_token()
-                messages = provider.list_channel_messages(args.channel_id, bot_token=bot_token, limit=args.limit, before=args.before, after=args.after)
+                session_provider = _discord_session_provider_for_account(storage, args.account_id)
+                if session_provider:
+                    try:
+                        messages = session_provider.list_channel_messages(args.channel_id, limit=args.limit, before=args.before, after=args.after)
+                    finally:
+                        session_provider.close()
+                    provenance = "session:web"
+                else:
+                    bot_token = provider.config.require_bot_token()
+                    messages = provider.list_channel_messages(args.channel_id, bot_token=bot_token, limit=args.limit, before=args.before, after=args.after)
+                    provenance = "bot:channel_messages"
             except (RuntimeError, DiscordAPIError, ValueError) as exc:
-                storage.record_discord_error(account_id=args.account_id, scope="messages", channel_id=args.channel_id, message=str(exc), status_code=getattr(exc, "status_code", None), route=getattr(exc, "route", None))
-                _stderr("error: " + redact_string(str(exc)))
+                safe_message = str(exc) if isinstance(exc, DiscordAPIError) else "Discord session:web material is not persisted; connect with session-connect"
+                storage.record_discord_error(account_id=args.account_id, scope="messages", channel_id=args.channel_id, message=redact_string(safe_message), status_code=getattr(exc, "status_code", None), route=getattr(exc, "route", None))
+                _stderr("error: " + redact_string(safe_message))
                 return 1
             inserted = 0
             duplicates = 0
             for message in messages:
-                if storage.insert_discord_message(account_id=args.account_id, channel_id=args.channel_id, message=message, provenance="bot:channel_messages"):
+                if storage.insert_discord_message(account_id=args.account_id, channel_id=args.channel_id, message=message, provenance=provenance):
                     inserted += 1
                 else:
                     duplicates += 1
