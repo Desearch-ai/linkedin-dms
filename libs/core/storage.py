@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -74,6 +75,104 @@ CREATE INDEX IF NOT EXISTS idx_outbound_sends_account_status ON outbound_sends(a
 
 _MIGRATION_4_BROWSER_CONTEXT = """
 ALTER TABLE accounts ADD COLUMN browser_context_json TEXT;
+"""
+
+_MIGRATION_5_DISCORD_SYNC = """
+CREATE TABLE IF NOT EXISTS discord_oauth_states (
+  state TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  consumed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS discord_accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  discord_user_id TEXT NOT NULL UNIQUE,
+  username TEXT,
+  global_name TEXT,
+  scopes_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL,
+  token_json TEXT,
+  token_persisted INTEGER NOT NULL DEFAULT 0,
+  token_expires_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discord_guilds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL,
+  discord_guild_id TEXT NOT NULL,
+  name TEXT,
+  icon TEXT,
+  owner INTEGER,
+  permissions TEXT,
+  provenance TEXT NOT NULL,
+  last_error TEXT,
+  last_synced_at TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(account_id, discord_guild_id),
+  FOREIGN KEY(account_id) REFERENCES discord_accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discord_channels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL,
+  discord_guild_id TEXT NOT NULL,
+  discord_channel_id TEXT NOT NULL,
+  name TEXT,
+  type INTEGER,
+  parent_id TEXT,
+  topic TEXT,
+  nsfw INTEGER,
+  position INTEGER,
+  provenance TEXT NOT NULL,
+  last_error TEXT,
+  last_synced_at TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(account_id, discord_channel_id),
+  FOREIGN KEY(account_id) REFERENCES discord_accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discord_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL,
+  discord_channel_id TEXT NOT NULL,
+  platform_message_id TEXT NOT NULL,
+  author_id TEXT,
+  author_username TEXT,
+  author_global_name TEXT,
+  content TEXT,
+  sent_at TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'live',
+  provenance TEXT NOT NULL,
+  raw_json TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(account_id, discord_channel_id, platform_message_id),
+  FOREIGN KEY(account_id) REFERENCES discord_accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS discord_sync_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER,
+  scope TEXT NOT NULL,
+  discord_guild_id TEXT,
+  discord_channel_id TEXT,
+  status_code INTEGER,
+  route TEXT,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(account_id) REFERENCES discord_accounts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_discord_guilds_account ON discord_guilds(account_id);
+CREATE INDEX IF NOT EXISTS idx_discord_channels_guild ON discord_channels(account_id, discord_guild_id);
+CREATE INDEX IF NOT EXISTS idx_discord_messages_channel ON discord_messages(account_id, discord_channel_id);
+CREATE INDEX IF NOT EXISTS idx_discord_errors_account ON discord_sync_errors(account_id, created_at);
 """
 
 
@@ -175,6 +274,7 @@ class Storage:
             (2, _MIGRATION_2_MESSAGES_CHECK),
             (3, _MIGRATION_3_OUTBOUND_SENDS),
             (4, _MIGRATION_4_BROWSER_CONTEXT),
+            (5, _MIGRATION_5_DISCORD_SYNC),
         ]
         for version, sql in migrations:
             if version > current:
@@ -467,3 +567,191 @@ class Storage:
                 (account_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Discord Sync storage
+    # ------------------------------------------------------------------
+
+    def create_discord_oauth_state(self, state: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO discord_oauth_states(state, created_at, consumed_at) VALUES (?, ?, NULL)",
+            (state, utcnow().isoformat()),
+        )
+        self._conn.commit()
+
+    def consume_discord_oauth_state(self, state: str) -> bool:
+        row = self._conn.execute(
+            "SELECT consumed_at FROM discord_oauth_states WHERE state=?", (state,)
+        ).fetchone()
+        if not row or row["consumed_at"]:
+            return False
+        self._conn.execute(
+            "UPDATE discord_oauth_states SET consumed_at=? WHERE state=?",
+            (utcnow().isoformat(), state),
+        )
+        self._conn.commit()
+        return True
+
+    def discord_token_persistence_enabled(self) -> bool:
+        return bool(os.environ.get("DESEARCH_ENCRYPTION_KEY", "").strip())
+
+    def upsert_discord_account(
+        self,
+        *,
+        discord_user_id: str,
+        username: str | None,
+        global_name: str | None,
+        scopes: list[str],
+        status: str,
+        token_material: dict[str, Any] | None,
+        token_expires_at: str | None,
+        last_error: str | None = None,
+    ) -> int:
+        now = utcnow().isoformat()
+        token_json: str | None = None
+        token_persisted = 0
+        if token_material is not None and self.discord_token_persistence_enabled():
+            token_json = encrypt_if_configured(json.dumps(token_material))
+            token_persisted = 1
+        self._conn.execute(
+            """
+            INSERT INTO discord_accounts(
+              discord_user_id, username, global_name, scopes_json, status, token_json,
+              token_persisted, token_expires_at, last_error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(discord_user_id) DO UPDATE SET
+              username=excluded.username,
+              global_name=excluded.global_name,
+              scopes_json=excluded.scopes_json,
+              status=excluded.status,
+              token_json=excluded.token_json,
+              token_persisted=excluded.token_persisted,
+              token_expires_at=excluded.token_expires_at,
+              last_error=excluded.last_error,
+              updated_at=excluded.updated_at
+            """,
+            (
+                discord_user_id, username, global_name, json.dumps(scopes), status, token_json,
+                token_persisted, token_expires_at, last_error, now, now,
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute("SELECT id FROM discord_accounts WHERE discord_user_id=?", (discord_user_id,)).fetchone()
+        return int(row["id"])
+
+    def get_discord_account(self, account_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM discord_accounts WHERE id=?", (account_id,)).fetchone()
+        return self._discord_account_row(row) if row else None
+
+    def list_discord_accounts(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM discord_accounts ORDER BY updated_at DESC, id DESC").fetchall()
+        return [self._discord_account_row(r) for r in rows]
+
+    def get_discord_account_token(self, account_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT token_json, token_persisted FROM discord_accounts WHERE id=?", (account_id,)).fetchone()
+        if not row or not row["token_json"] or not row["token_persisted"]:
+            return None
+        return json.loads(decrypt_if_encrypted(row["token_json"]))
+
+    def _discord_account_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d.pop("token_json", None)
+        d["token_persisted"] = bool(d.get("token_persisted"))
+        d["scopes"] = json.loads(d.pop("scopes_json") or "[]")
+        return d
+
+    def upsert_discord_guild(self, *, account_id: int, guild: dict[str, Any], provenance: str) -> None:
+        now = utcnow().isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO discord_guilds(account_id, discord_guild_id, name, icon, owner, permissions, provenance, last_error, last_synced_at, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+            ON CONFLICT(account_id, discord_guild_id) DO UPDATE SET
+              name=excluded.name, icon=excluded.icon, owner=excluded.owner, permissions=excluded.permissions, provenance=excluded.provenance,
+              last_error=NULL, last_synced_at=excluded.last_synced_at, raw_json=excluded.raw_json, updated_at=excluded.updated_at
+            """,
+            (account_id, str(guild.get("id")), guild.get("name"), guild.get("icon"), int(bool(guild.get("owner"))) if guild.get("owner") is not None else None, str(guild.get("permissions")) if guild.get("permissions") is not None else None, provenance, now, json.dumps(guild), now, now),
+        )
+        self._conn.commit()
+
+    def list_discord_guilds(self, *, account_id: int) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM discord_guilds WHERE account_id=? ORDER BY name COLLATE NOCASE, discord_guild_id", (account_id,)).fetchall()
+        return [self._row_with_json(r, "raw_json") for r in rows]
+
+    def upsert_discord_channel(self, *, account_id: int, guild_id: str, channel: dict[str, Any], provenance: str) -> None:
+        now = utcnow().isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO discord_channels(account_id, discord_guild_id, discord_channel_id, name, type, parent_id, topic, nsfw, position, provenance, last_error, last_synced_at, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+            ON CONFLICT(account_id, discord_channel_id) DO UPDATE SET
+              discord_guild_id=excluded.discord_guild_id, name=excluded.name, type=excluded.type, parent_id=excluded.parent_id,
+              topic=excluded.topic, nsfw=excluded.nsfw, position=excluded.position, provenance=excluded.provenance,
+              last_error=NULL, last_synced_at=excluded.last_synced_at, raw_json=excluded.raw_json, updated_at=excluded.updated_at
+            """,
+            (account_id, guild_id, str(channel.get("id")), channel.get("name"), channel.get("type"), channel.get("parent_id"), channel.get("topic"), int(bool(channel.get("nsfw"))) if channel.get("nsfw") is not None else None, channel.get("position"), provenance, now, json.dumps(channel), now, now),
+        )
+        self._conn.commit()
+
+    def list_discord_channels(self, *, account_id: int, guild_id: str | None = None) -> list[dict[str, Any]]:
+        if guild_id:
+            rows = self._conn.execute("SELECT * FROM discord_channels WHERE account_id=? AND discord_guild_id=? ORDER BY position, name COLLATE NOCASE", (account_id, guild_id)).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM discord_channels WHERE account_id=? ORDER BY discord_guild_id, position, name COLLATE NOCASE", (account_id,)).fetchall()
+        return [self._row_with_json(r, "raw_json") for r in rows]
+
+    def insert_discord_message(self, *, account_id: int, channel_id: str, message: dict[str, Any], provenance: str) -> bool:
+        author = message.get("author") or {}
+        sent_at = message.get("timestamp") or utcnow().isoformat()
+        now = utcnow().isoformat()
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO discord_messages(account_id, discord_channel_id, platform_message_id, author_id, author_username, author_global_name, content, sent_at, source, provenance, raw_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?, ?)
+                """,
+                (account_id, channel_id, str(message.get("id")), author.get("id"), author.get("username"), author.get("global_name"), message.get("content"), sent_at, provenance, json.dumps(message), now),
+            )
+            self._conn.commit()
+            return True
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed" in str(e):
+                return False
+            raise
+
+    def list_discord_messages(self, *, account_id: int | None = None, channel_id: str | None = None, q: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if account_id is not None:
+            clauses.append("account_id=?")
+            params.append(account_id)
+        if channel_id is not None:
+            clauses.append("discord_channel_id=?")
+            params.append(channel_id)
+        if q:
+            clauses.append("content LIKE ?")
+            params.append(f"%{q}%")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(limit)
+        rows = self._conn.execute(f"SELECT * FROM discord_messages{where} ORDER BY sent_at DESC, id DESC LIMIT ?", params).fetchall()
+        return [self._row_with_json(r, "raw_json") for r in rows]
+
+    def record_discord_error(self, *, account_id: int | None, scope: str, message: str, guild_id: str | None = None, channel_id: str | None = None, status_code: int | None = None, route: str | None = None) -> None:
+        self._conn.execute(
+            "INSERT INTO discord_sync_errors(account_id, scope, discord_guild_id, discord_channel_id, status_code, route, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (account_id, scope, guild_id, channel_id, status_code, route, message, utcnow().isoformat()),
+        )
+        self._conn.commit()
+
+    def list_discord_errors(self, *, account_id: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if account_id is None:
+            rows = self._conn.execute("SELECT * FROM discord_sync_errors ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM discord_sync_errors WHERE account_id=? ORDER BY created_at DESC, id DESC LIMIT ?", (account_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def _row_with_json(self, row: sqlite3.Row, json_field: str) -> dict[str, Any]:
+        d = dict(row)
+        value = d.get(json_field)
+        d[json_field.replace("_json", "")] = json.loads(value) if value else None
+        return d

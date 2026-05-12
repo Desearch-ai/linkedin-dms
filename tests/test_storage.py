@@ -43,7 +43,19 @@ def test_migrate_creates_tables_and_indexes(storage):
     conn.close()
     tables = {r[0] for r in rows if r[1] == "table"}
     indexes = {r[0] for r in rows if r[1] == "index"}
-    assert tables >= {"accounts", "threads", "messages", "sync_cursors", "schema_version"}
+    assert tables >= {
+        "accounts",
+        "threads",
+        "messages",
+        "sync_cursors",
+        "schema_version",
+        "discord_accounts",
+        "discord_guilds",
+        "discord_channels",
+        "discord_messages",
+        "discord_sync_errors",
+        "discord_oauth_states",
+    }
     assert "idx_threads_account_id" in indexes
     assert "idx_messages_thread_id" in indexes
     assert "idx_messages_account_id" in indexes
@@ -56,8 +68,8 @@ def test_schema_version_exists_after_migrate(storage):
 
 
 def test_schema_version_is_current_after_migrate(storage):
-    """Regression: migrate() leaves schema at current version (4 = browser_context)."""
-    assert storage._get_schema_version() == 4
+    """Regression: migrate() leaves schema at current version (5 = Discord Sync tables)."""
+    assert storage._get_schema_version() == 5
 
 
 def test_migrate_idempotent(storage):
@@ -116,7 +128,7 @@ def test_migrate_upgrades_preexisting_baseline_db(tmp_path):
     s.migrate()
 
     # Verify schema_version is current.
-    assert s._get_schema_version() == 4
+    assert s._get_schema_version() == 5
 
     # Verify indexes exist.
     indexes = {r[0] for r in s._conn.execute(
