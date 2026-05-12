@@ -283,6 +283,29 @@ class Storage:
                 self._conn.commit()
                 current = version
 
+        # Some local validation databases may have schema_version=5 recorded from a
+        # prior interrupted run while the Discord tables themselves are absent.
+        # Migration 5 is written with CREATE TABLE/INDEX IF NOT EXISTS, so replay it
+        # as an idempotent repair when any Discord Sync table is missing.
+        if current >= 5 and self._missing_discord_sync_tables():
+            self._conn.executescript(_MIGRATION_5_DISCORD_SYNC)
+            self._conn.commit()
+
+    def _missing_discord_sync_tables(self) -> list[str]:
+        expected = {
+            "discord_oauth_states",
+            "discord_accounts",
+            "discord_guilds",
+            "discord_channels",
+            "discord_messages",
+            "discord_sync_errors",
+        }
+        rows = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'discord_%'"
+        ).fetchall()
+        present = {str(row[0]) for row in rows}
+        return sorted(expected - present)
+
     def create_account(
         self,
         *,
