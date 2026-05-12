@@ -676,6 +676,12 @@ class Storage:
             return None
         return json.loads(decrypt_if_encrypted(row["token_json"]))
 
+    def get_discord_account_session(self, account_id: int) -> dict[str, Any] | None:
+        material = self.get_discord_account_token(account_id)
+        if not material or material.get("kind") != "session:web":
+            return None
+        return material
+
     def _discord_account_row(self, row: sqlite3.Row) -> dict[str, Any]:
         d = dict(row)
         d.pop("token_json", None)
