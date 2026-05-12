@@ -623,30 +623,247 @@ def list_sends(account_id: int, status: str | None = None):
 
 @app.get("/discord", response_class=HTMLResponse, dependencies=[Depends(require_api_auth)])
 def discord_ui():
-    """Minimal local UI for live Discord Sync state and actions."""
+    """Usable local UI for live Discord Sync browsing and guarded read-only sync."""
     return """
 <!doctype html>
-<html><head><title>Discord Sync</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}button,input{margin:.25rem;padding:.45rem}.badge{background:#eef;border-radius:.5rem;padding:.15rem .4rem}pre{background:#111;color:#eee;padding:1rem;overflow:auto}</style></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discord Sync</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#0f172a;--panel:#111827;--panel2:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--line:#374151;--accent:#8b5cf6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--chip:#312e81}
+    body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:linear-gradient(135deg,#0b1021,#161826);color:var(--text)}
+    main{max-width:1280px;margin:0 auto;padding:2rem} h1{margin:0 0 .35rem;font-size:2rem} h2{font-size:1rem;margin:0 0 .75rem} p{color:var(--muted)}
+    button,input{font:inherit} button{border:1px solid var(--line);border-radius:.7rem;background:#263244;color:var(--text);padding:.55rem .75rem;cursor:pointer} button:hover:not(:disabled){border-color:var(--accent)} button:disabled{opacity:.45;cursor:not-allowed}
+    input{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:.7rem;background:#0b1220;color:var(--text);padding:.65rem;margin:.2rem 0 .55rem}.badge,.chip{display:inline-flex;align-items:center;gap:.25rem;border-radius:999px;padding:.2rem .55rem;background:var(--chip);font-size:.78rem}.muted{color:var(--muted)}
+    .grid{display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:1rem}.panel{background:rgba(17,24,39,.88);border:1px solid var(--line);border-radius:1rem;padding:1rem;box-shadow:0 10px 30px rgba(0,0,0,.18)}.wide{grid-column:1/-1}.stack{display:flex;flex-direction:column;gap:.65rem}.row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}.item{width:100%;text-align:left;background:#111827;border:1px solid var(--line);border-radius:.8rem;padding:.75rem}.item.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}.item strong{display:block}.meta{font-size:.82rem;color:var(--muted);margin-top:.35rem}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.empty{border:1px dashed var(--line);border-radius:.8rem;padding:.9rem;color:var(--muted);background:#0b1220}.error{border-color:rgba(239,68,68,.55);background:rgba(127,29,29,.25);color:#fecaca}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.75rem}.card{background:#0b1220;border:1px solid var(--line);border-radius:.8rem;padding:.75rem}.card b{display:block;font-size:1.15rem} pre{background:#020617;color:#d1d5db;border:1px solid var(--line);border-radius:.8rem;padding:1rem;overflow:auto;max-height:360px}.message{white-space:pre-wrap}.debug-note{font-size:.82rem;color:var(--muted)}
+    @media(max-width:980px){.grid,.cards{grid-template-columns:1fr}}
+  </style>
+</head>
 <body>
-<h1>Discord Sync <span class="badge">session/web read-only live API MVP</span></h1>
-<p>Primary path: connect an approved logged-in Discord Web session, then read only guilds, channels, and messages visible to that user. OAuth/app auth remains optional fallback.</p>
-<button onclick="call('/discord/auth/status')">Session/auth status</button>
-<button onclick="call('/discord/auth/start')">Optional OAuth URL</button>
-<br>
-<input id="statePath" placeholder="session_state_path preferred"><input id="cookie" placeholder="Cookie header fallback"><input id="ua" placeholder="User-Agent optional">
-<button onclick="post('/discord/session/connect',{session_state_path:statePath.value||null,cookie_header:cookie.value||null,user_agent:ua.value||null})">Connect session/web</button>
-<br>
-<input id="account" placeholder="account_id"><input id="guild" placeholder="guild_id"><input id="channel" placeholder="channel_id"><input id="q" placeholder="search">
-<br>
-<button onclick="post('/discord/sync/guilds',{account_id:+account.value})">Sync guilds</button>
-<button onclick="post('/discord/sync/channels',{account_id:+account.value,guild_id:guild.value})">Sync channels</button>
-<button onclick="post('/discord/sync/messages',{account_id:+account.value,channel_id:channel.value,limit:50})">Sync messages</button>
-<button onclick="call('/discord/guilds?account_id='+account.value)">List guilds</button>
-<button onclick="call('/discord/channels?account_id='+account.value+'&guild_id='+guild.value)">List channels</button>
-<button onclick="call('/discord/messages?account_id='+account.value+'&channel_id='+channel.value+'&q='+encodeURIComponent(q.value))">Search messages</button>
-<button onclick="call('/discord/errors?account_id='+account.value)">Errors</button>
-<pre id="out">Ready. session/web provenance, live-vs-fixture source badges, last sync timestamps, and permission/auth errors render here.</pre>
-<script>async function call(u){let r=await fetch(u); out.textContent=JSON.stringify(await r.json(),null,2)} async function post(u,b){let r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}); out.textContent=JSON.stringify(await r.json(),null,2)}</script>
+<main>
+  <header class="wide">
+    <h1>Discord Sync <span class="badge">session/web read-only live API MVP</span></h1>
+    <p>Browse approved Discord accounts, servers, channels, recent messages, search results, provenance, last sync timestamps, and permission/fetch errors without typing raw IDs. credential material is never rendered in the product flow.</p>
+  </header>
+
+  <section id="globalError" class="panel error wide" hidden></section>
+
+  <section class="grid">
+    <section class="panel">
+      <h2>Session status</h2>
+      <div id="statusPanel" class="stack"><div class="empty">Loading Discord auth status…</div></div>
+      <div class="row" style="margin-top:.75rem">
+        <button id="refreshStatusBtn" type="button">Refresh status</button>
+        <button id="oauthBtn" type="button">Optional OAuth URL</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Connected accounts</h2>
+      <div id="accountList" class="stack"><div class="empty">No connected Discord accounts yet.</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Missing config</h2>
+      <div id="configPanel" class="stack"><div class="empty">Checking local configuration…</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Guilds / servers</h2>
+      <div class="row" style="margin-bottom:.65rem"><button id="syncGuildsBtn" type="button" disabled>Sync guilds</button></div>
+      <div id="guildList" class="stack"><div class="empty">No account selected.</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Channels</h2>
+      <div class="row" style="margin-bottom:.65rem"><button id="syncChannelsBtn" type="button" disabled>Sync channels</button></div>
+      <div id="channelList" class="stack"><div class="empty">Select a guild to load channels.</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Messages & search</h2>
+      <label class="muted" for="searchBox">Search selected channel</label>
+      <input id="searchBox" placeholder="keyword/topic (optional)" autocomplete="off">
+      <div class="row" style="margin-bottom:.65rem">
+        <button id="searchBtn" type="button" disabled>Search messages</button>
+        <button id="syncMessagesBtn" type="button" disabled>Sync recent messages</button>
+      </div>
+      <div id="messageList" class="stack"><div class="empty">Select a channel to load messages.</div></div>
+    </section>
+
+    <section class="panel wide">
+      <h2>Counts</h2>
+      <div id="countsPanel" class="cards">
+        <div class="card"><span class="muted">Accounts</span><b>0</b></div>
+        <div class="card"><span class="muted">Guilds</span><b>0</b></div>
+        <div class="card"><span class="muted">Channels</span><b>0</b></div>
+        <div class="card"><span class="muted">Messages</span><b>0</b></div>
+      </div>
+    </section>
+
+    <section class="panel wide">
+      <h2>Permission/fetch errors</h2>
+      <div id="errorList" class="stack"><div class="empty">No permission/fetch errors loaded.</div></div>
+    </section>
+
+    <section class="panel wide">
+      <h2>Debug JSON</h2>
+      <p class="debug-note">Last API response for troubleshooting. Account/server/channel identifiers can appear here, but Discord tokens, cookies, authorization headers, and other credential material are never rendered by the API/UI.</p>
+      <pre id="debugPanel">Ready.</pre>
+    </section>
+
+    <section class="panel wide">
+      <h2>Advanced: connect approved session/web</h2>
+      <p class="muted">Prefer a local storage-state file. Paste cookie/header material only for an explicitly approved local validation session; the response/debug panel is redacted.</p>
+      <label class="muted" for="sessionStatePath">Session state path</label><input id="sessionStatePath" placeholder="/path/to/storage-state.json">
+      <label class="muted" for="cookieHeader">Cookie header fallback</label><input id="cookieHeader" placeholder="approved Discord Web Cookie header">
+      <label class="muted" for="userAgent">User-Agent optional</label><input id="userAgent" placeholder="Mozilla/5.0">
+      <button id="connectSessionBtn" type="button">Connect session/web</button>
+    </section>
+  </section>
+</main>
+<script>
+const state = { accountId: null, guildId: null, channelId: null, status: null, guilds: [], channels: [], messages: [], errors: [] };
+const $ = (id) => document.getElementById(id);
+function esc(value){ return String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function setGlobalError(message){ const box = $('globalError'); if(!message){ box.hidden = true; box.textContent = ''; return; } box.hidden = false; box.textContent = message; }
+function empty(message){ return `<div class="empty">${esc(message)}</div>`; }
+function pill(text, cls='chip'){ return `<span class="${cls}">${esc(text)}</span>`; }
+function setDebug(label, data){ $('debugPanel').textContent = `${label}\n` + JSON.stringify(data, null, 2); }
+async function api(path, options = {}){
+  setGlobalError('');
+  try {
+    const response = await fetch(path, options);
+    const body = await response.json().catch(() => ({}));
+    setDebug(`${options.method || 'GET'} ${path} → ${response.status}`, body);
+    if(!response.ok){ throw new Error(body.detail || body.message || `Request failed with ${response.status}`); }
+    return body;
+  } catch (error) {
+    setGlobalError(error.message || String(error));
+    throw error;
+  }
+}
+function renderCounts(){
+  const accounts = (state.status?.accounts || []).length;
+  $('countsPanel').innerHTML = [
+    ['Accounts', accounts], ['Guilds', state.guilds.length], ['Channels', state.channels.length], ['Messages', state.messages.length]
+  ].map(([label, value]) => `<div class="card"><span class="muted">${label}</span><b>${value}</b></div>`).join('');
+}
+function renderStatus(data){
+  const accounts = data.accounts || [];
+  $('statusPanel').innerHTML = `
+    <div class="row">${pill(data.ok ? 'API reachable' : 'API issue', data.ok ? 'chip ok' : 'chip bad')} ${pill(data.config?.session_web_supported ? 'session/web supported' : 'session/web unavailable')}</div>
+    <div><strong>Session status</strong><div class="meta">${accounts.length ? `${accounts.length} connected account(s)` : 'No connected Discord accounts yet'}</div></div>
+    <div><strong>Persistence</strong><div class="meta">${data.config?.session_persistence_enabled ? 'Encrypted local session persistence enabled' : 'DESEARCH_ENCRYPTION_KEY missing — new session material cannot persist'}</div></div>
+    <div><strong>Scopes</strong><div class="meta">${accounts.flatMap(a => a.scopes || []).join(', ') || 'No account scopes available yet'}</div></div>`;
+}
+function renderConfig(config = {}){
+  const missing = [...(config.missing_oauth || [])];
+  if(!config.session_persistence_enabled) missing.unshift('DESEARCH_ENCRYPTION_KEY');
+  $('configPanel').innerHTML = missing.length
+    ? `<div class="empty warn"><strong>Missing config</strong><div class="meta">${missing.map(esc).join(', ')}</div></div>`
+    : `<div class="empty ok"><strong>Config ready</strong><div class="meta">OAuth/session settings available for local use.</div></div>`;
+}
+function renderAccounts(accounts){
+  if(!accounts.length){ $('accountList').innerHTML = empty('No connected Discord accounts yet. Connect an approved session/web account or complete OAuth first.'); return; }
+  $('accountList').innerHTML = accounts.map(account => `
+    <button class="item ${account.id === state.accountId ? 'active' : ''}" type="button" data-account-id="${esc(account.id)}">
+      <strong>${esc(account.global_name || account.username || account.discord_user_id || ('Account ' + account.id))}</strong>
+      <div class="meta">Status: ${esc(account.status || 'unknown')} · Persistence: ${account.token_persisted ? 'persisted' : 'not persisted'}</div>
+      <div class="meta">Scopes: ${esc((account.scopes || []).join(', ') || 'none')} · Updated: ${esc(account.updated_at || 'never')}</div>
+    </button>`).join('');
+  $('accountList').querySelectorAll('[data-account-id]').forEach(btn => btn.addEventListener('click', () => selectAccount(Number(btn.dataset.accountId))));
+}
+async function loadStatus(){
+  const data = await api('/discord/auth/status');
+  state.status = data;
+  renderStatus(data); renderConfig(data.config); renderAccounts(data.accounts || []);
+  if((data.accounts || []).length && !state.accountId){ const account = data.accounts[0]; selectAccount(account.id); }
+  renderCounts();
+}
+function setSelectionGuards(){
+  $('syncGuildsBtn').disabled = !state.accountId;
+  $('syncChannelsBtn').disabled = !(state.accountId && state.guildId);
+  $('searchBtn').disabled = !(state.accountId && state.channelId);
+  $('syncMessagesBtn').disabled = !(state.accountId && state.channelId);
+}
+async function selectAccount(accountId){
+  if(!accountId){ $('guildList').innerHTML = empty('No account selected.'); setSelectionGuards(); return; }
+  state.accountId = accountId; state.guildId = null; state.channelId = null; state.channels = []; state.messages = [];
+  renderAccounts(state.status?.accounts || []); setSelectionGuards();
+  $('channelList').innerHTML = empty('Select a guild to load channels.'); $('messageList').innerHTML = empty('Select a channel to load messages.');
+  await Promise.all([loadGuilds(), loadErrors()]);
+}
+async function loadGuilds(){
+  if(!state.accountId){ $('guildList').innerHTML = empty('No account selected.'); return; }
+  const params = new URLSearchParams({account_id: String(state.accountId)});
+  const data = await api(`/discord/guilds?${params}`); state.guilds = data.guilds || [];
+  $('guildList').innerHTML = state.guilds.length ? state.guilds.map(guild => `
+    <button class="item ${guild.discord_guild_id === state.guildId ? 'active' : ''}" type="button" data-guild-id="${esc(guild.discord_guild_id)}">
+      <strong>${esc(guild.name || guild.discord_guild_id)}</strong>
+      <div class="meta">Provenance: ${esc(guild.provenance || 'unknown')} · Last synced: ${esc(guild.last_synced_at || 'never')}</div>
+      <div class="meta">Owner: ${guild.owner ? 'yes' : 'no'} · Permissions: ${esc(guild.permissions || 'unknown')}</div>
+    </button>`).join('') : empty('No guilds synced yet. Use Sync guilds when an approved persisted session is present.');
+  $('guildList').querySelectorAll('[data-guild-id]').forEach(btn => btn.addEventListener('click', () => selectGuild(btn.dataset.guildId)));
+  renderCounts(); setSelectionGuards();
+}
+async function selectGuild(guildId){ state.guildId = guildId; state.channelId = null; state.messages = []; $('messageList').innerHTML = empty('Select a channel to load messages.'); await loadChannels(); setSelectionGuards(); }
+async function loadChannels(){
+  if(!state.accountId){ $('channelList').innerHTML = empty('No account selected.'); return; }
+  if(!state.guildId){ $('channelList').innerHTML = empty('Select a guild to load channels.'); return; }
+  const params = new URLSearchParams({account_id: String(state.accountId), guild_id: state.guildId});
+  const data = await api(`/discord/channels?${params}`); state.channels = data.channels || [];
+  $('channelList').innerHTML = state.channels.length ? state.channels.map(channel => `
+    <button class="item ${channel.discord_channel_id === state.channelId ? 'active' : ''}" type="button" data-channel-id="${esc(channel.discord_channel_id)}">
+      <strong>#${esc(channel.name || channel.discord_channel_id)}</strong>
+      <div class="meta">Provenance: ${esc(channel.provenance || 'unknown')} · Last synced: ${esc(channel.last_synced_at || 'never')}</div>
+      <div class="meta">Type: ${esc(channel.type ?? 'unknown')} · Topic: ${esc(channel.topic || 'none')}</div>
+    </button>`).join('') : empty('No channels synced for this guild yet. Use Sync channels when permissions allow it.');
+  $('channelList').querySelectorAll('[data-channel-id]').forEach(btn => btn.addEventListener('click', () => selectChannel(btn.dataset.channelId)));
+  renderCounts(); setSelectionGuards();
+}
+async function selectChannel(channelId){ state.channelId = channelId; await loadMessages(); setSelectionGuards(); }
+async function loadMessages(){
+  if(!state.accountId){ $('messageList').innerHTML = empty('No account selected.'); return; }
+  if(!state.channelId){ $('messageList').innerHTML = empty('Select a channel to load messages.'); return; }
+  const params = new URLSearchParams({account_id: String(state.accountId), channel_id: state.channelId, limit: '50'});
+  const q = $('searchBox').value.trim(); if(q) params.set('q', q);
+  const data = await api(`/discord/messages?${params}`); state.messages = data.messages || [];
+  $('messageList').innerHTML = state.messages.length ? state.messages.map(message => `
+    <article class="item">
+      <strong>${esc(message.author_global_name || message.author_username || message.author_id || 'Unknown author')}</strong>
+      <div class="message">${esc(message.content || '[empty message]')}</div>
+      <div class="meta">Source: ${esc(message.source || 'unknown')} · Provenance: ${esc(message.provenance || 'unknown')} · Sent: ${esc(message.sent_at || 'unknown')}</div>
+    </article>`).join('') : empty(q ? 'No messages matched this search in the selected channel.' : 'No messages loaded for this channel yet.');
+  renderCounts();
+}
+async function loadErrors(){
+  const params = state.accountId ? new URLSearchParams({account_id: String(state.accountId)}) : new URLSearchParams();
+  const data = await api(`/discord/errors?${params}`); state.errors = data.errors || [];
+  $('errorList').innerHTML = state.errors.length ? state.errors.map(error => `
+    <div class="item error"><strong>${esc(error.scope || 'sync')} ${error.status_code ? '(' + esc(error.status_code) + ')' : ''}</strong>
+      <div>${esc(error.message || 'Unknown error')}</div><div class="meta">Route: ${esc(error.route || 'n/a')} · Created: ${esc(error.created_at || 'unknown')}</div></div>`).join('') : empty('No permission/fetch errors for the selected account.');
+}
+function requireAccount(){ if(!state.accountId){ setGlobalError('No account selected.'); return false; } return true; }
+function requireGuild(){ if(!requireAccount()) return false; if(!state.guildId){ setGlobalError('Select a guild to load channels.'); return false; } return true; }
+function requireChannel(){ if(!requireAccount()) return false; if(!state.channelId){ setGlobalError('Select a channel to load messages.'); return false; } return true; }
+async function postJson(path, body){ return api(path, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)}); }
+async function syncGuilds(){ if(!requireAccount()) return; const result = await postJson('/discord/sync/guilds', {account_id: state.accountId}); await Promise.all([loadGuilds(), loadErrors()]); if(result.ok === false) setGlobalError('Guild sync reported an error. See Permission/fetch errors.'); }
+async function syncChannels(){ if(!requireGuild()) return; const result = await postJson('/discord/sync/channels', {account_id: state.accountId, guild_id: state.guildId}); await Promise.all([loadChannels(), loadErrors()]); if(result.ok === false) setGlobalError('Channel sync reported an error. See Permission/fetch errors.'); }
+async function syncMessages(){ if(!requireChannel()) return; const result = await postJson('/discord/sync/messages', {account_id: state.accountId, channel_id: state.channelId, limit: 50}); await Promise.all([loadMessages(), loadErrors()]); if(result.ok === false) setGlobalError('Message sync reported an error. See Permission/fetch errors.'); }
+async function connectSession(){
+  const body = {session_state_path: $('sessionStatePath').value.trim() || null, cookie_header: $('cookieHeader').value.trim() || null, user_agent: $('userAgent').value.trim() || null};
+  if(!body.session_state_path && !body.cookie_header){ setGlobalError('Provide a session state path or approved Cookie header before connecting.'); return; }
+  await postJson('/discord/session/connect', body); $('cookieHeader').value = ''; await loadStatus();
+}
+async function openOAuth(){ const data = await api('/discord/auth/start'); if(data.authorization_url) window.open(data.authorization_url, '_blank', 'noopener,noreferrer'); }
+window.addEventListener('DOMContentLoaded', () => {
+  $('refreshStatusBtn').addEventListener('click', loadStatus); $('oauthBtn').addEventListener('click', openOAuth); $('syncGuildsBtn').addEventListener('click', syncGuilds); $('syncChannelsBtn').addEventListener('click', syncChannels); $('syncMessagesBtn').addEventListener('click', syncMessages); $('searchBtn').addEventListener('click', loadMessages); $('searchBox').addEventListener('keydown', (event) => { if(event.key === 'Enter') loadMessages(); }); $('connectSessionBtn').addEventListener('click', connectSession);
+  setSelectionGuards(); loadStatus().catch(() => {});
+});
+</script>
 </body></html>
 """
 

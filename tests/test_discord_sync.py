@@ -469,3 +469,58 @@ def test_cli_and_ui_label_discord_as_session_web_not_bot_required(client, capsys
     assert "session/web" in html
     assert "/discord/session/connect" in html
     assert "bot-token" not in html.lower()
+
+
+def test_discord_ui_renders_usable_product_flow_not_raw_id_tester(client):
+    resp = client.get("/discord")
+    assert resp.status_code == 200
+    html = resp.text
+
+    # Product flow sections Giga can use without guessing IDs.
+    assert 'id="statusPanel"' in html
+    assert 'id="accountList"' in html
+    assert 'id="guildList"' in html
+    assert 'id="channelList"' in html
+    assert 'id="messageList"' in html
+    assert 'id="searchBox"' in html
+    assert 'id="debugPanel"' in html
+
+    # Auto-load and selectable account -> guild -> channel -> message/search flow.
+    assert "DOMContentLoaded" in html
+    assert "loadStatus" in html
+    assert "selectAccount(account.id)" in html
+    assert "loadGuilds" in html
+    assert "selectGuild(btn.dataset.guildId)" in html
+    assert "loadChannels" in html
+    assert "selectChannel(btn.dataset.channelId)" in html
+    assert "loadMessages" in html
+    assert "URLSearchParams" in html
+
+    # Guarded empty states instead of NaN/blank API calls from empty text inputs.
+    assert "No connected Discord accounts yet" in html
+    assert "Select a guild to load channels" in html
+    assert "Select a channel to load messages" in html
+    assert "No account selected" in html
+    assert "account_id" not in html.split('id="debugPanel"', 1)[0].lower()
+    assert "+account.value" not in html
+
+
+def test_discord_ui_surfaces_provenance_counts_errors_and_redacted_debug_copy(client):
+    resp = client.get("/discord")
+    assert resp.status_code == 200
+    html = resp.text
+
+    assert "Session status" in html
+    assert "Persistence" in html
+    assert "Scopes" in html
+    assert "Missing config" in html
+    assert "Provenance" in html
+    assert "Last synced" in html
+    assert "Permission/fetch errors" in html
+    assert "Debug JSON" in html
+    assert "credential material is never rendered" in html
+    assert "Sync guilds" in html
+    assert "Sync channels" in html
+    assert "Sync recent messages" in html
+    assert "disabled" in html
+    assert "bot-token" not in html.lower()
