@@ -403,3 +403,70 @@ def test_browser_context_column_added_by_migration(tmp_path):
     cols = {r[1] for r in s._conn.execute("PRAGMA table_info(accounts)").fetchall()}
     assert "browser_context_json" in cols
     s.close()
+
+
+def test_migrate_repairs_missing_discord_tables_when_schema_version_is_current(tmp_path):
+    db_path = tmp_path / "partial-v5.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE accounts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          label TEXT NOT NULL,
+          auth_json TEXT NOT NULL,
+          proxy_json TEXT,
+          created_at TEXT NOT NULL,
+          browser_context_json TEXT
+        );
+        CREATE TABLE threads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          account_id INTEGER NOT NULL,
+          platform_thread_id TEXT NOT NULL,
+          title TEXT,
+          raw_json TEXT,
+          UNIQUE(account_id, platform_thread_id)
+        );
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          account_id INTEGER NOT NULL,
+          thread_id INTEGER NOT NULL,
+          platform_message_id TEXT NOT NULL,
+          direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+          sender TEXT,
+          text TEXT,
+          sent_at TEXT NOT NULL,
+          raw_json TEXT,
+          UNIQUE(account_id, platform_message_id)
+        );
+        CREATE TABLE sync_cursors (
+          account_id INTEGER NOT NULL,
+          thread_id INTEGER NOT NULL,
+          cursor TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(account_id, thread_id)
+        );
+        CREATE TABLE outbound_sends (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          account_id INTEGER NOT NULL,
+          idempotency_key TEXT,
+          recipient TEXT NOT NULL,
+          text TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+          platform_message_id TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(account_id, idempotency_key)
+        );
+        CREATE TABLE schema_version (single_row INTEGER NOT NULL PRIMARY KEY CHECK (single_row = 1), version INTEGER NOT NULL);
+        INSERT INTO schema_version(single_row, version) VALUES (1, 5);
+    """)
+    conn.commit()
+    conn.close()
+
+    storage = Storage(db_path=db_path)
+    storage.migrate()
+    missing = storage._missing_discord_sync_tables()
+    storage.close()
+
+    assert missing == []
